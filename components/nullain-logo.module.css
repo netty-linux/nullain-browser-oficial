@@ -1,0 +1,55 @@
+.root {
+  display: inline-grid;
+  flex: none;
+  overflow: hidden;
+}
+
+.asset {
+  grid-area: 1 / 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.lightAnimated {
+  mix-blend-mode: multiply;
+}
+
+.darkAnimated,
+.lightStatic,
+.darkStatic {
+  display: none;
+}
+
+:global(.dark) .lightAnimated {
+  display: none;
+}
+
+:global(.dark) .darkAnimated {
+  display: block;
+  mix-blend-mode: screen;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lightAnimated,
+  .darkAnimated {
+    display: none;
+  }
+
+  :global(.dark) .darkAnimated {
+    display: none;
+  }
+
+  .lightStatic {
+    display: block;
+  }
+
+  :global(.dark) .lightStatic {
+    display: none;
+  }
+
+  :global(.dark) .darkStatic {
+    display: block;
+  }
+}
