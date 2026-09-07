@@ -2,6 +2,9 @@
 
 Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant-ui.
 
+<img width="1917" height="914" alt="image" src="https://github.com/user-attachments/assets/549eff33-eeb9-47a8-8482-9f7925940520" />
+
+
 ## Recursos
 
 - Kernel supervisor com processos especializados de pesquisa, código e síntese.
