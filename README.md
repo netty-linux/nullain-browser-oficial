@@ -4,6 +4,10 @@ Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant
 
 <img width="1917" height="914" alt="image" src="https://github.com/user-attachments/assets/549eff33-eeb9-47a8-8482-9f7925940520" />
 
+<img width="1919" height="917" alt="image" src="https://github.com/user-attachments/assets/ad3a5543-96d9-4884-aea5-d702ed5b380b" />
+
+<img width="1919" height="917" alt="image" src="https://github.com/user-attachments/assets/a609f1c6-3c15-40d5-a2eb-fcaaf4a335fc" />
+
 
 ## Recursos
 
