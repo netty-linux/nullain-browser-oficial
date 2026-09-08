@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   ChevronsLeftIcon,
   ChevronsRightIcon,
+  Code2Icon,
   MessagesSquareIcon,
   MoonIcon,
   PlugIcon,
@@ -51,10 +52,15 @@ export function ThreadListSidebar() {
     setDark(next);
   };
 
-  const activeTab = pathname === "/plugins" ? "plugins" : tab;
+  const activeTab = pathname.startsWith("/code")
+    ? "code"
+    : pathname === "/plugins"
+      ? "plugins"
+      : tab;
 
   const options = [
     { key: "chats", label: "Chats", Icon: MessagesSquareIcon },
+    { key: "code", label: "Code", Icon: Code2Icon },
     { key: "search", label: "Search", Icon: SearchIcon },
     { key: "skills", label: "Skills", Icon: PuzzleIcon },
     { key: "plugins", label: "Plugins", Icon: PlugIcon },
@@ -62,6 +68,10 @@ export function ThreadListSidebar() {
   ] as const;
 
   const selectTab = (nextTab: (typeof options)[number]["key"]) => {
+    if (nextTab === "code") {
+      router.push("/code");
+      return;
+    }
     if (nextTab === "plugins") {
       router.push("/plugins");
       return;

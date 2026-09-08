@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCrossSiteMutation } from "./request-security";
+import { isCrossSiteMutation, isInvalidCookieMutationOrigin } from "./request-security";
 
 describe("isCrossSiteMutation", () => {
   it("permite mutações da mesma origem", () => {
@@ -23,5 +23,23 @@ describe("isCrossSiteMutation", () => {
       headers: { "sec-fetch-site": "cross-site" },
     });
     expect(isCrossSiteMutation(request)).toBe(false);
+  });
+});
+
+describe("isInvalidCookieMutationOrigin", () => {
+  it("exige origem ou referer explícito em mutações autenticadas por cookie", () => {
+    expect(
+      isInvalidCookieMutationOrigin(
+        new Request("http://localhost:3000/api/code/projects", { method: "POST" }),
+      ),
+    ).toBe(true);
+    expect(
+      isInvalidCookieMutationOrigin(
+        new Request("http://localhost:3000/api/code/projects", {
+          method: "POST",
+          headers: { referer: "http://localhost:3000/code" },
+        }),
+      ),
+    ).toBe(false);
   });
 });

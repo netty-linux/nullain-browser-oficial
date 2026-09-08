@@ -5,6 +5,7 @@ import { kernelAgent, KERNEL_POLICY } from "./agents/kernel-agent";
 import { researchAgent } from "./agents/research-agent";
 import { codingAgent } from "./agents/coding-agent";
 import { synthesisAgent } from "./agents/synthesis-agent";
+import { createNullainCodeController } from "./nullain-code/controller";
 
 /**
  * ============================================================================
@@ -31,6 +32,8 @@ export const mastraStorage = new LibSQLStore({
   url: process.env.NULLAIN_DB_URL ?? "file:mastra.db",
 });
 
+export const nullainCodeController = createNullainCodeController(mastraStorage);
+
 export const mastra = new Mastra({
   agents: {
     // NOVO: kernel (supervisor) + processos.
@@ -41,6 +44,9 @@ export const mastra = new Mastra({
     // LEGADO preservado (zero breaking change na interface de cliente):
     // Mantido para clientes legados e para o endpoint AG-UI.
     chatAgent,
+  },
+  agentControllers: {
+    nullainCode: nullainCodeController,
   },
   storage: mastraStorage,
   logger: false,

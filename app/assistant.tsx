@@ -157,7 +157,7 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
           <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             {children}
           </main>
-          {pathname !== "/plugins" && <ComputerSidebar />}
+          {pathname !== "/plugins" && !pathname.startsWith("/code") && <ComputerSidebar />}
         </div>
       </div>
     </AssistantRuntimeProvider>

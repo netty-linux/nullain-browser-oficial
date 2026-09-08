@@ -12,6 +12,9 @@
  */
 
 export const MODELS = {
+  /** Nullain Code — controlador interativo de projeto, independente do codingAgent legado. */
+  nullainCode: process.env.MASTRA_MODEL_NULLAIN_CODE ?? "ollama-cloud/deepseek-v4-flash:0731",
+
   /**
    * Kernel (supervisor) — coordenação, síntese, tom da persona.
    * Default igual ao chat atual (gpt-oss:20b), forte o bastante para

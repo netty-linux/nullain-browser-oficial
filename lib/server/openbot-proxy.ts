@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 const DEFAULT_OPENBOT_URL = "http://localhost:3001";
 const MAX_PROXY_BODY_BYTES = 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 45_000;
+const NULLAIN_COOKIE_NAMES = /^(?:__Secure-)?nullain-code-auth[.-]/;
 
 export type ProxyRule = {
   method: string;
@@ -27,6 +28,15 @@ function rejectsCrossSiteMutation(request: NextRequest): boolean {
   } catch {
     return true;
   }
+}
+
+export function withoutNullainAuthCookies(cookieHeader: string | null) {
+  if (!cookieHeader) return undefined;
+  const filtered = cookieHeader
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .filter((cookie) => cookie && !NULLAIN_COOKIE_NAMES.test(cookie.split("=", 1)[0]));
+  return filtered.length ? filtered.join("; ") : undefined;
 }
 
 export async function proxyOpenBot(
@@ -67,13 +77,14 @@ export async function proxyOpenBot(
   try {
     const base = openBotBaseUrl();
     const upstream = new URL(`${upstreamPrefix}/${relativePath}`, `${base.origin}/`);
+    const forwardedCookie = withoutNullainAuthCookies(request.headers.get("cookie"));
     const response = await fetch(upstream, {
       method: request.method,
       headers: {
         ...(request.headers.get("content-type")
           ? { "content-type": request.headers.get("content-type")! }
           : {}),
-        ...(request.headers.get("cookie") ? { cookie: request.headers.get("cookie")! } : {}),
+        ...(forwardedCookie ? { cookie: forwardedCookie } : {}),
       },
       body,
       cache: "no-store",
