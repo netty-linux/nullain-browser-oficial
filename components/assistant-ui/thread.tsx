@@ -9,7 +9,13 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ActivityBlock } from "@/components/assistant-ui/activity-block";
 import { MessageSources } from "@/components/assistant-ui/message-sources";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-import { CHAT_MODEL_IDS as MODEL_IDS, loadEffort, saveEffort, saveModel } from "@/lib/chat-model";
+import {
+  CHAT_MODEL_IDS as MODEL_IDS,
+  loadDisabledSkills,
+  loadEffort,
+  saveEffort,
+  saveModel,
+} from "@/lib/chat-model";
 import {
   DEFAULT_VISION_CHAT_MODEL,
   VISION_CHAT_MODEL_IDS,
@@ -27,6 +33,7 @@ import {
   useComposerComputer,
 } from "@/components/assistant-ui/composer-plus-menu";
 import { SkillChip } from "@/components/assistant-ui/skill-chip";
+import { ComposerSkillSelector, useSkillSelection } from "@/components/assistant-ui/skill-selector";
 import { GenerationMedia } from "@/components/assistant-ui/generation-media";
 import { RunningActivity } from "@/components/assistant-ui/running-activity";
 import { PluginConnectionPrompt } from "@/components/assistant-ui/plugin-connection-prompt";
@@ -70,10 +77,12 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
+  LoaderCircleIcon,
   MicIcon,
   MonitorIcon,
   MoreHorizontalIcon,
   PencilIcon,
+  PuzzleIcon,
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
@@ -434,6 +443,39 @@ const Composer: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     (s) => s.composer.attachments.some((a) => a.type === "image") ?? false,
   );
   const { computer } = useComposerComputer();
+  const aui = useAui();
+  const { selected, clear } = useSkillSelection();
+  const [skillSendError, setSkillSendError] = useState("");
+  const [checkingSkill, setCheckingSkill] = useState(false);
+
+  const sendWithSelectedSkill = async () => {
+    if (!selected || checkingSkill) return;
+    setCheckingSkill(true);
+    setSkillSendError("");
+    try {
+      if (loadDisabledSkills().includes(selected.name)) {
+        throw new Error("Ative a skill selecionada antes de enviar.");
+      }
+      const response = await fetch(`/api/skills/${encodeURIComponent(selected.name)}`, {
+        cache: "no-store",
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "A skill selecionada não está mais disponível.");
+      }
+      aui.composer.setRunConfig({
+        custom: { selectedSkill: { id: selected.name, title: selected.displayName } },
+      });
+      aui.composer.send();
+      clear();
+    } catch (error) {
+      setSkillSendError(
+        error instanceof Error ? error.message : "Não foi possível validar a skill.",
+      );
+    } finally {
+      setCheckingSkill(false);
+    }
+  };
 
   return (
     <ComposerPrimitive.Root
@@ -441,6 +483,12 @@ const Composer: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         if (hasImageAttachment && computer) {
           e.preventDefault();
           e.stopPropagation();
+          return;
+        }
+        if (selected) {
+          e.preventDefault();
+          e.stopPropagation();
+          void sendWithSelectedSkill();
         }
       }}
       className="aui-composer-root relative flex w-full flex-col"
@@ -458,6 +506,12 @@ const Composer: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       >
         <ComposerAttachments />
         <ComposerComputerImageWarning />
+        <ComposerSkillSelector />
+        {skillSendError && (
+          <p className="mx-3 mt-1 text-xs text-destructive" role="alert">
+            {skillSendError} O rascunho foi preservado.
+          </p>
+        )}
         <ComposerPrimitive.Input
           placeholder="Pergunte qualquer coisa..."
           className={cn(
@@ -469,7 +523,10 @@ const Composer: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           enterKeyHint="send"
           aria-label="Message input"
         />
-        <ComposerAction />
+        <ComposerAction
+          onSelectedSend={() => void sendWithSelectedSkill()}
+          checkingSkill={checkingSkill}
+        />
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
@@ -481,7 +538,6 @@ const ComposerComputerImageWarning: FC = () => {
   const hasImageAttachment = useAuiState(
     (s) => s.composer.attachments.some((a) => a.type === "image") ?? false,
   );
-
   if (!computer || !hasImageAttachment) return null;
   return (
     <div
@@ -507,7 +563,10 @@ const ComposerComputerImageWarning: FC = () => {
   );
 };
 
-const ComposerAction: FC = () => {
+const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }> = ({
+  onSelectedSend,
+  checkingSkill,
+}) => {
   const [model, setModel] = useState("ollama-cloud/gpt-oss:20b");
   const [effort, setEffort] = useState<string | undefined>(undefined);
   const [hydrated, setHydrated] = useState(false);
@@ -595,7 +654,7 @@ const ComposerAction: FC = () => {
           </AuiIf>
         </AuiIf>
         <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerSendWithGuard />
+          <ComposerSendWithGuard onSelectedSend={onSelectedSend} checkingSkill={checkingSkill} />
         </AuiIf>
         <AuiIf condition={(s) => s.thread.isRunning}>
           <ComposerPrimitive.Cancel
@@ -618,31 +677,56 @@ const ComposerAction: FC = () => {
 };
 
 /** Botão de envio: desabilita quando há imagem anexada + Computador ativo. */
-const ComposerSendWithGuard: FC = () => {
+const ComposerSendWithGuard: FC<{ onSelectedSend: () => void; checkingSkill: boolean }> = ({
+  onSelectedSend,
+  checkingSkill,
+}) => {
   const { computer } = useComposerComputer();
   const hasImageAttachment = useAuiState(
     (s) => s.composer.attachments.some((a) => a.type === "image") ?? false,
   );
   const blocked = computer && hasImageAttachment;
+  const canSend = useAuiState((state) => state.composer.canSend);
+  const { selected } = useSkillSelection();
+
+  if (selected) {
+    return (
+      <TooltipIconButton
+        tooltip="Send message"
+        side="bottom"
+        type="button"
+        variant="default"
+        size="icon"
+        disabled={blocked || checkingSkill || !canSend}
+        onClick={onSelectedSend}
+        className="aui-composer-send size-9 rounded-full shadow-sm transition-transform hover:scale-[1.03] active:scale-95"
+        aria-label="Send message"
+      >
+        {checkingSkill ? (
+          <LoaderCircleIcon className="size-4 animate-spin" />
+        ) : (
+          <ArrowUpIcon className="size-4" />
+        )}
+      </TooltipIconButton>
+    );
+  }
+
+  const button = (
+    <TooltipIconButton
+      tooltip={blocked ? "Desligue o Computador para enviar mensagens com imagens" : "Send message"}
+      side="bottom"
+      type="button"
+      variant="default"
+      size="icon"
+      disabled={blocked}
+      className="aui-composer-send size-9 rounded-full shadow-sm transition-transform hover:scale-[1.03] active:scale-95"
+      aria-label="Send message"
+      aria-disabled={blocked}
+    />
+  );
 
   return (
-    <ComposerPrimitive.Send
-      render={
-        <TooltipIconButton
-          tooltip={
-            blocked ? "Desligue o Computador para enviar mensagens com imagens" : "Send message"
-          }
-          side="bottom"
-          type="button"
-          variant="default"
-          size="icon"
-          disabled={blocked}
-          className="aui-composer-send size-9 rounded-full shadow-sm transition-transform hover:scale-[1.03] active:scale-95"
-          aria-label="Send message"
-          aria-disabled={blocked}
-        />
-      }
-    >
+    <ComposerPrimitive.Send render={button}>
       <ArrowUpIcon className="aui-composer-send-icon size-4" />
     </ComposerPrimitive.Send>
   );
@@ -852,6 +936,14 @@ const UserMessage: FC = () => {
   const isInternalMessage = useAuiState(
     (state) => state.message.metadata.custom.nullainInternal === true,
   );
+  const selectedSkillValue = useAuiState((state) => state.message.metadata.custom.selectedSkill);
+  const selectedSkill = useMemo(() => {
+    const value = selectedSkillValue;
+    if (!value || typeof value !== "object") return null;
+    const id = (value as { id?: unknown }).id;
+    const title = (value as { title?: unknown }).title;
+    return typeof id === "string" ? { id, title: typeof title === "string" ? title : id } : null;
+  }, [selectedSkillValue]);
 
   if (isInternalMessage) return null;
 
@@ -862,6 +954,14 @@ const UserMessage: FC = () => {
       data-role="user"
     >
       <UserMessageAttachments />
+
+      {selectedSkill && (
+        <div className="col-start-2 flex justify-end">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.04] px-2.5 py-1 text-[11px] text-muted-foreground">
+            <PuzzleIcon className="size-3" /> {selectedSkill.title}
+          </span>
+        </div>
+      )}
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-[1.35rem] px-4 py-2.5 text-[16px] leading-6 shadow-[inset_0_0_0_1px_rgb(0_0_0/0.018)] wrap-break-word empty:hidden">

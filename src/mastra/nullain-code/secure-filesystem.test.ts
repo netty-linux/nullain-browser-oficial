@@ -62,4 +62,22 @@ describe("SecureProjectFilesystem", () => {
     await fs.link(path.join(directory, "source.txt"), path.join(directory, "linked.txt"));
     await expect(filesystem.readFile("linked.txt")).rejects.toThrow(/Hard links/);
   });
+
+  it("tracks real file changes and produces a reviewable patch", async () => {
+    const { directory, filesystem } = await fixture("build");
+    await fs.writeFile(path.join(directory, "existing.txt"), "before\n");
+    await filesystem.readFile("existing.txt");
+    filesystem.resetTrackedChanges();
+
+    await filesystem.writeFile("existing.txt", "after\n");
+    await filesystem.writeFile("created.txt", "new\n");
+
+    const changes = await filesystem.getTrackedChanges();
+    expect(changes.map(({ path, status }) => ({ path, status }))).toEqual([
+      { path: "created.txt", status: "added" },
+      { path: "existing.txt", status: "modified" },
+    ]);
+    expect(changes.find((change) => change.path === "existing.txt")?.patch).toContain("-before");
+    expect(changes.find((change) => change.path === "existing.txt")?.patch).toContain("+after");
+  });
 });

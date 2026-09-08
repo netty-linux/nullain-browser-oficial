@@ -1,16 +1,24 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { getSkill, loadSkills, listSkillFiles, readSkillFile } from "../skills/loader";
+import {
+  DuplicateSkillError,
+  getSkill,
+  loadSkills,
+  listSkillFiles,
+  readSkillFile,
+  skillContentEnvelope,
+  writeUserSkill,
+} from "../skills/loader";
 import type { Skill } from "../skills/loader";
 
 /**
  * Tool load_skill — progressive disclosure das skills.
  * O agente vê só o índice no system prompt; quando julga relevante, chama esta
  * tool para receber o corpo completo da skill (instruções detalhadas) e a segue.
- * Também lista os arquivos de apoio (references/scripts/assets) para que o
+ * Também lista os arquivos de apoio para que o
  * agente possa ler material detalhado sob demanda via read_skill_file.
  */
-function createLoadSkillTool(disabledSkills: readonly string[]) {
+function createLoadSkillTool(disabledSkills: readonly string[], ownerId?: string) {
   return createTool({
     id: "load_skill",
     description:
@@ -31,12 +39,12 @@ function createLoadSkillTool(disabledSkills: readonly string[]) {
       available: z.array(z.string()).optional(),
     }),
     execute: async (input) => {
-      const skill = getSkill(input.name, disabledSkills);
+      const skill = getSkill(input.name, disabledSkills, ownerId);
       if (skill) {
         return {
           found: true,
           name: skill.name,
-          instructions: skill.body,
+          instructions: skillContentEnvelope(skill),
           files: listSkillFiles(skill),
         };
       }
@@ -44,8 +52,11 @@ function createLoadSkillTool(disabledSkills: readonly string[]) {
         found: false,
         name: input.name,
         instructions: `Skill "${input.name}" não encontrada.`,
-        available: loadSkills()
-          .filter((s: Skill) => !disabledSkills.includes(s.name))
+        available: loadSkills(false, ownerId)
+          .filter(
+            (s: Skill) =>
+              !disabledSkills.some((name) => name.toLowerCase() === s.name.toLowerCase()),
+          )
           .map((s: Skill) => s.name),
       };
     },
@@ -53,16 +64,16 @@ function createLoadSkillTool(disabledSkills: readonly string[]) {
 }
 
 /**
- * Tool read_skill_file — lê um arquivo de apoio (references/scripts/assets)
+ * Tool read_skill_file — lê um arquivo de apoio da skill
  * de uma skill carregada. Progressive disclosure de recursos: o agente só
  * carrega o arquivo quando a skill instruir (ex.: "leia references/api.md
  * se a API retornar erro").
  */
-function createReadSkillFileTool(disabledSkills: readonly string[]) {
+function createReadSkillFileTool(disabledSkills: readonly string[], ownerId?: string) {
   return createTool({
     id: "read_skill_file",
     description:
-      "Read a bundled support file (references/, scripts/, assets/) of a skill you have already loaded with load_skill. Use this when the skill's instructions tell you to consult a specific file on demand. Pass the file path exactly as listed in the load_skill result.",
+      "Read a bundled support file of a skill you have already loaded with load_skill. Use this when the skill's instructions tell you to consult a specific file on demand. Pass the file path exactly as listed in the load_skill result.",
     inputSchema: z.object({
       skill: z.string().min(1).describe("The skill name (must be loaded first via load_skill)."),
       file: z
@@ -80,7 +91,7 @@ function createReadSkillFileTool(disabledSkills: readonly string[]) {
       error: z.string().optional(),
     }),
     execute: async (input) => {
-      const skill = getSkill(input.skill, disabledSkills);
+      const skill = getSkill(input.skill, disabledSkills, ownerId);
       if (!skill) {
         return {
           found: false,
@@ -103,13 +114,103 @@ function createReadSkillFileTool(disabledSkills: readonly string[]) {
   });
 }
 
+function createSkillCreatorTool(ownerId: string) {
+  return createTool({
+    id: "create_skill",
+    description:
+      "Create and register one specification-compliant Agent Skill in the authenticated user's private catalog. Only call after the user explicitly requested skill creation and the official Agent Skills documentation has been consulted when relevant. Never overwrite an identifier or execute bundled scripts.",
+    inputSchema: z.object({
+      name: z.string().min(1).max(64).describe("Stable kebab-case technical identifier."),
+      description: z
+        .string()
+        .min(1)
+        .max(1024)
+        .describe("English description of what it handles and when to use it."),
+      instructions: z
+        .string()
+        .min(1)
+        .max(200_000)
+        .describe(
+          "Reusable SKILL.md body, written in English unless explicitly requested otherwise.",
+        ),
+      displayName: z.string().min(1).max(100).optional(),
+      summary: z.string().min(1).max(240).optional(),
+      license: z.string().min(1).optional(),
+      compatibility: z.string().min(1).max(500).optional(),
+      metadata: z.record(z.string(), z.string()).optional(),
+      allowedTools: z
+        .string()
+        .min(1)
+        .describe("Space-separated pre-approved tools (experimental).")
+        .optional(),
+      resources: z
+        .array(
+          z.object({
+            path: z
+              .string()
+              .min(1)
+              .max(240)
+              .describe(
+                "Relative package path under references/, scripts/, templates/, or assets/.",
+              ),
+            content: z.string().max(1_000_000),
+          }),
+        )
+        .max(32)
+        .optional(),
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      name: z.string(),
+      created: z.boolean().optional(),
+      enabled: z.boolean().optional(),
+      location: z.string().optional(),
+      error: z.string().optional(),
+      conflict: z.boolean().optional(),
+    }),
+    execute: async (input) => {
+      try {
+        const result = writeUserSkill(ownerId, input.name, input.description, input.instructions, {
+          displayName: input.displayName,
+          summary: input.summary,
+          license: input.license,
+          compatibility: input.compatibility,
+          metadata: input.metadata,
+          allowedTools: input.allowedTools,
+          resources: input.resources,
+        });
+        return {
+          ok: true,
+          name: input.name,
+          created: result.created,
+          enabled: false,
+          location: `Catálogo privado /skills/${input.name}`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          name: input.name,
+          error: error instanceof Error ? error.message : "Não foi possível criar a skill.",
+          conflict: error instanceof DuplicateSkillError,
+        };
+      }
+    },
+  });
+}
+
 /** Constrói tools isoladas para uma única requisição. */
-export function createSkillsToolset(disabledSkills: readonly string[] = []) {
+export function createSkillsToolset(
+  disabledSkills: readonly string[] = [],
+  options: { ownerId?: string; allowCreate?: boolean } = {},
+) {
   const disabled = [...new Set(disabledSkills)];
   return {
     skills: {
-      load_skill: createLoadSkillTool(disabled),
-      read_skill_file: createReadSkillFileTool(disabled),
+      load_skill: createLoadSkillTool(disabled, options.ownerId),
+      read_skill_file: createReadSkillFileTool(disabled, options.ownerId),
+      ...(options.ownerId && options.allowCreate
+        ? { create_skill: createSkillCreatorTool(options.ownerId) }
+        : {}),
     },
   } as const;
 }

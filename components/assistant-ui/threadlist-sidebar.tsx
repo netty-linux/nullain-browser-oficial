@@ -19,10 +19,10 @@ import { GitHubIcon } from "@/components/github";
 import { NullainLogo } from "@/components/nullain-logo";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
 import { ThreadSearchPanel } from "@/components/assistant-ui/thread-search-panel";
-import { SkillsPanel } from "@/components/assistant-ui/skills-panel";
 import { CoworkersPanel } from "@/components/assistant-ui/coworkers-panel";
 
-type SidebarTab = "chats" | "search" | "skills" | "coworkers";
+type SidebarTab = "chats" | "search" | "coworkers";
+const SIDEBAR_COLLAPSED_KEY = "nullain-sidebar-collapsed";
 
 /**
  * Barra lateral da Nullain — no molde do OpenBot: header com marca + New,
@@ -37,6 +37,7 @@ export function ThreadListSidebar() {
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 767px)");
+    if (!mobile.matches) setCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1");
     const collapseOnMobile = (event: MediaQueryList | MediaQueryListEvent) => {
       if (event.matches) setCollapsed(true);
     };
@@ -44,6 +45,11 @@ export function ThreadListSidebar() {
     mobile.addEventListener("change", collapseOnMobile);
     return () => mobile.removeEventListener("change", collapseOnMobile);
   }, []);
+
+  const updateCollapsed = (value: boolean) => {
+    setCollapsed(value);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, value ? "1" : "0");
+  };
 
   const toggleTheme = () => {
     const next = !document.documentElement.classList.contains("dark");
@@ -56,7 +62,9 @@ export function ThreadListSidebar() {
     ? "code"
     : pathname === "/plugins"
       ? "plugins"
-      : tab;
+      : pathname === "/skills"
+        ? "skills"
+        : tab;
 
   const options = [
     { key: "chats", label: "Chats", Icon: MessagesSquareIcon },
@@ -74,6 +82,10 @@ export function ThreadListSidebar() {
     }
     if (nextTab === "plugins") {
       router.push("/plugins");
+      return;
+    }
+    if (nextTab === "skills") {
+      router.push("/skills");
       return;
     }
 
@@ -97,7 +109,7 @@ export function ThreadListSidebar() {
             <NullainLogo className="size-8" />
             <button
               type="button"
-              onClick={() => setCollapsed(false)}
+              onClick={() => updateCollapsed(false)}
               aria-label="Expandir menu lateral"
               title="Expandir menu lateral"
               className="flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"
@@ -115,7 +127,7 @@ export function ThreadListSidebar() {
             </div>
             <button
               type="button"
-              onClick={() => setCollapsed(true)}
+              onClick={() => updateCollapsed(true)}
               aria-label="Recolher menu lateral"
               title="Recolher menu lateral"
               className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-foreground/6 hover:text-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"
@@ -155,12 +167,12 @@ export function ThreadListSidebar() {
         {/* Conteúdo da aba selecionada (escondido quando colapsado) */}
         {!collapsed && (
           <div className="mt-3 flex-1 overflow-hidden border-t border-sidebar-border/60 pt-3">
-            {pathname === "/plugins" ? null : tab === "chats" ? (
+            {pathname === "/plugins" ||
+            pathname === "/skills" ||
+            pathname.startsWith("/code") ? null : tab === "chats" ? (
               <ThreadList />
             ) : tab === "search" ? (
               <ThreadSearchPanel onOpenThread={() => setTab("chats")} />
-            ) : tab === "skills" ? (
-              <SkillsPanel />
             ) : (
               <CoworkersPanel />
             )}
@@ -169,14 +181,19 @@ export function ThreadListSidebar() {
       </div>
 
       {/* Rodapé: tema + GitHub, sem texto de copyright */}
-      <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border/80 p-3">
+      <div
+        className={cn(
+          "flex shrink-0 items-center border-t border-sidebar-border/80",
+          collapsed ? "flex-col gap-1 p-2" : "gap-1 p-3",
+        )}
+      >
         <button
           type="button"
           onClick={toggleTheme}
           aria-label="Alternar tema"
           className={cn(
             "flex h-11 flex-1 items-center gap-2.5 rounded-xl px-2.5 text-[15px] font-medium text-foreground/76 transition-colors hover:bg-foreground/[0.045] hover:text-foreground",
-            collapsed && "justify-center px-0",
+            collapsed && "h-10 w-full flex-none justify-center px-0",
           )}
         >
           <span className="flex size-7 shrink-0 items-center justify-center">
@@ -191,7 +208,7 @@ export function ThreadListSidebar() {
           aria-label="GitHub netty-linux"
           className={cn(
             "flex h-11 items-center gap-2 rounded-xl px-2 text-foreground/70 transition-colors hover:bg-foreground/[0.045] hover:text-foreground",
-            collapsed && "flex-none px-0",
+            collapsed && "h-10 w-full justify-center px-0",
           )}
         >
           <span className="flex size-7 shrink-0 items-center justify-center">

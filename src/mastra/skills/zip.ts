@@ -1,22 +1,24 @@
 import { unzipSync } from "fflate";
-import { join, resolve, sep } from "node:path";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { isValidSkillName, userSkillsDir, loadSkills, MAX_DESCRIPTION_LENGTH } from "./loader";
+import { assertSkillNameAvailable, writeUserSkillDocument } from "./loader";
+import { parseAgentSkill } from "./spec";
 
 const MAX_FILES = 200;
 const MAX_TOTAL_BYTES = 5 * 1024 * 1024;
 
 /**
- * Extrai um zip de skill para skills/user/<name>/.
+ * Extracts an Agent Skill package into the authenticated owner's catalog.
  * O nome vem do frontmatter do SKILL.md (dentro do zip), NÃO do nome do arquivo.
  * Aceita SKILL.md na raiz do zip ou dentro de UMA subpasta (padrão GitHub).
  *
  * Segurança:
  * - zip-slip: entries com "..", caminho absoluto ou drive letter são descartadas
  * - zip bomb: máx 200 arquivos e 5 MB descompactados
- * - destino sempre dentro de skills/user/<nome-validado>/
+ * - destination always remains inside the owner's validated skill directory
  */
-export function extractSkillZip(zipBuffer: Buffer): {
+export function extractSkillZip(
+  zipBuffer: Buffer,
+  ownerId: string,
+): {
   skillName: string;
   files: number;
   skillMdPath: string;
@@ -68,52 +70,25 @@ export function extractSkillZip(zipBuffer: Buffer): {
     throw new Error("O zip não contém um SKILL.md na raiz (ou em uma única subpasta)");
   }
 
-  const { name, description } = parseFrontmatter(skillEntry.data.toString("utf-8"));
-  if (!isValidSkillName(name)) {
-    throw new Error(`Frontmatter 'name' inválido: "${name}" (use kebab-case: a-z, 0-9, hífen)`);
-  }
-  if (description.length > MAX_DESCRIPTION_LENGTH) {
-    throw new Error(`Frontmatter 'description' muito longa (máx ${MAX_DESCRIPTION_LENGTH} chars)`);
-  }
+  const markdown = skillEntry.data.toString("utf-8");
+  const packagedDirectory = prefixLen > 0 ? skillEntry.path.split("/")[0] : undefined;
+  const { frontmatter } = parseAgentSkill(markdown, packagedDirectory);
+  const name = frontmatter.name;
+  assertSkillNameAvailable(name, ownerId);
 
   const normalizedPaths = new Set<string>();
   for (const entry of collected) {
     const relativePath = stripTop(entry.path, prefixLen);
-    if (relativePath !== "SKILL.md" && !/^(?:references|scripts|assets)\//.test(relativePath)) {
-      throw new Error(`arquivo fora das pastas permitidas: "${relativePath}"`);
-    }
     const key = relativePath.toLowerCase();
     if (normalizedPaths.has(key)) throw new Error(`arquivo duplicado no zip: "${relativePath}"`);
     normalizedPaths.add(key);
   }
 
-  const base = resolve(userSkillsDir());
-  const dest = resolve(base, name);
-  if (!dest.startsWith(base + sep)) throw new Error("Caminho de destino inválido");
-
-  // Recria o diretório (replace de skill existente com o mesmo nome)
-  rmSync(dest, { recursive: true, force: true });
-  mkdirSync(dest, { recursive: true });
-
-  for (const e of collected) {
-    const rel = stripTop(e.path, prefixLen);
-    if (rel === "SKILL.md") continue; // reescrito normalizado abaixo
-    const target = resolve(dest, rel);
-    if (!target.startsWith(dest + sep)) continue; // zip-slip guard final
-    mkdirSync(resolve(target, ".."), { recursive: true });
-    writeFileSync(target, e.data);
-  }
-
-  // SKILL.md normalizado: frontmatter name = nome do diretório (consistência)
-  const body = skillEntry.data
-    .toString("utf-8")
-    .replace(/^---[\s\S]*?---\r?\n?/, "")
-    .trim();
-  const normalizedMd = `---\nname: ${name}\ndescription: ${description.replace(/\r?\n/g, " ")}\n---\n\n${body}\n`;
-  writeFileSync(join(dest, "SKILL.md"), normalizedMd, "utf-8");
-
-  loadSkills(true); // invalida cache do loader
-  return { skillName: name, files: collected.length, skillMdPath: join(dest, "SKILL.md") };
+  const resources = collected
+    .map((entry) => ({ path: stripTop(entry.path, prefixLen), content: entry.data }))
+    .filter((entry) => entry.path !== "SKILL.md");
+  const result = writeUserSkillDocument(ownerId, markdown, resources, packagedDirectory);
+  return { skillName: name, files: collected.length, skillMdPath: result.path };
 }
 
 function isSafeZipPath(path: string): boolean {
@@ -131,23 +106,9 @@ function isSafeZipPath(path: string): boolean {
   );
 }
 
-/** Frontmatter mínimo sem dependência (name/description). */
-function parseFrontmatter(raw: string): { name: string; description: string } {
-  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) throw new Error("SKILL.md sem frontmatter YAML (--- name/description ---)");
-  const fm: Record<string, string> = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^([a-zA-Z_][\w-]*)\s*:\s*(.*)$/);
-    if (kv) fm[kv[1].trim()] = kv[2].trim().replace(/^["']|["']$/g, "");
-  }
-  if (!fm.name || !fm.description) {
-    throw new Error("SKILL.md precisa de frontmatter com 'name' e 'description'");
-  }
-  return { name: fm.name, description: fm.description };
-}
-
 /** Se todas as entradas compartilham a MESMA primeira pasta, ela é stripada. */
 function commonTopDir(paths: string[]): number {
+  if (paths.some((path) => !path.includes("/"))) return 0;
   const first = paths[0]?.split("/")[0] ?? "";
   if (!first || paths.some((p) => p.split("/")[0] !== first)) return 0;
   return 1;

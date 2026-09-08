@@ -10,6 +10,14 @@ import {
 } from "@/lib/model-catalog";
 import { useChatRuntime, AssistantChatTransport } from "@assistant-ui/react-ai-sdk";
 import type { AttachmentAdapter } from "@assistant-ui/react";
+import type { AppendMessage } from "@assistant-ui/react";
+import {
+  httpUrlPattern,
+  parseDataUrl,
+  resolveFileMediaType,
+  resolveImageMediaType,
+  toMediaWireUrl,
+} from "@assistant-ui/core/internal";
 import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import { usePathname } from "next/navigation";
 
@@ -77,10 +85,73 @@ import {
 import { ComputerToolUI } from "@/components/assistant-ui/computer-tool-ui";
 import { ThreadListSidebar } from "@/components/assistant-ui/threadlist-sidebar";
 import { ComputerSidebar } from "@/components/assistant-ui/computer-sidebar";
+import { SkillSelectionProvider } from "@/components/assistant-ui/skill-selector";
+import { SkillCreatorToolUI } from "@/components/assistant-ui/skill-creator-tool-ui";
+
+function toNullainMessage(message: AppendMessage) {
+  const parts = [
+    ...message.content,
+    ...(message.attachments?.flatMap((attachment) =>
+      attachment.content.map((content) => ({
+        ...content,
+        filename: attachment.name,
+        contentType: attachment.contentType,
+      })),
+    ) ?? []),
+  ].map((part) => {
+    if (part.type === "text") return { type: "text" as const, text: part.text };
+    if (part.type === "image") {
+      const mediaType = resolveImageMediaType(
+        part.image,
+        (part as typeof part & { contentType?: string }).contentType,
+      );
+      return {
+        type: "file" as const,
+        url: toMediaWireUrl(part.image, mediaType),
+        mediaType,
+        ...(part.filename ? { filename: part.filename } : {}),
+      };
+    }
+    if (part.type === "file") {
+      const mediaType = resolveFileMediaType(part.data, part.mimeType);
+      return {
+        type: "file" as const,
+        url: part.sourceType === "id" ? part.data : toMediaWireUrl(part.data, mediaType),
+        mediaType,
+        ...(part.filename ? { filename: part.filename } : {}),
+      };
+    }
+    if (part.type === "audio") {
+      const mediaType = `audio/${part.audio.format}`;
+      return {
+        type: "file" as const,
+        url: httpUrlPattern.test(part.audio.data)
+          ? part.audio.data
+          : `data:${mediaType};base64,${parseDataUrl(part.audio.data)?.data ?? part.audio.data}`,
+        mediaType,
+      };
+    }
+    if (part.type === "data")
+      return { type: `data-${part.name}` as `data-${string}`, data: part.data };
+    throw new Error(`Tipo de mensagem não suportado: ${(part as { type: string }).type}`);
+  });
+  return {
+    role: message.role,
+    parts,
+    metadata: {
+      ...message.metadata,
+      custom: {
+        ...message.metadata.custom,
+        ...message.runConfig?.custom,
+      },
+    },
+  } as never;
+}
 
 export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNode }>) => {
   const pathname = usePathname();
   const runtime = useChatRuntime({
+    toCreateMessage: toNullainMessage,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     adapters: {
       attachments: compressedImageAttachmentAdapter,
@@ -149,17 +220,22 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
     <AssistantRuntimeProvider runtime={runtime}>
       {/* Registra a tool UI do computador (inline na thread) — Inversão FASE 5. */}
       <ComputerToolUI />
-      <div className="nullain-stage relative h-svh w-full overflow-hidden p-0 md:p-4 xl:p-7">
-        {/* Um único frame reúne navegação, trabalho e computador. Em telas
+      <SkillCreatorToolUI />
+      <SkillSelectionProvider>
+        <div className="nullain-stage relative h-svh w-full overflow-hidden p-0 md:p-4 xl:p-7">
+          {/* Um único frame reúne navegação, trabalho e computador. Em telas
             pequenas ele volta a ocupar o viewport inteiro. */}
-        <div className="nullain-app-frame flex h-full w-full overflow-hidden border-foreground/8 bg-background md:rounded-[1.5rem] md:border">
-          <ThreadListSidebar />
-          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            {children}
-          </main>
-          {pathname !== "/plugins" && !pathname.startsWith("/code") && <ComputerSidebar />}
+          <div className="nullain-app-frame flex h-full w-full overflow-hidden border-foreground/8 bg-background md:rounded-[1.5rem] md:border">
+            <ThreadListSidebar />
+            <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+              {children}
+            </main>
+            {pathname !== "/plugins" && pathname !== "/skills" && !pathname.startsWith("/code") && (
+              <ComputerSidebar />
+            )}
+          </div>
         </div>
-      </div>
+      </SkillSelectionProvider>
     </AssistantRuntimeProvider>
   );
 };

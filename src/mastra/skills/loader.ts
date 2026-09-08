@@ -1,84 +1,88 @@
 import {
-  readFileSync,
   existsSync,
-  readdirSync,
-  statSync,
   mkdirSync,
-  writeFileSync,
+  readFileSync,
+  realpathSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
   rmSync,
+  statSync,
+  writeFileSync,
 } from "node:fs";
-import { join, dirname, resolve, sep } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { dirname, join, resolve, sep } from "node:path";
+import {
+  MAX_SKILL_DESCRIPTION_LENGTH,
+  createAgentSkillDocument,
+  isValidAgentSkillName,
+  parseAgentSkill,
+  type AgentSkillFrontmatter,
+} from "./spec";
 
-/**
- * Nullain Skills — loader de SKILL.md (formato Agent Skills open source).
- *
- * Progressive disclosure: o system prompt carrega SÓ o índice (name +
- * description, ~40 tokens/skill). O corpo completo entra no contexto apenas
- * quando o agente chama a tool load_skill(name).
- *
- * Formato de cada skill:
- *   skills/<nome>/SKILL.md com frontmatter YAML:
- *   ---
- *   name: web-research
- *   description: Deep research multi-query com citações. Use quando ...
- *   ---
- *   (corpo markdown com instruções)
- */
+export type SkillSource = "native" | "user";
 
 export interface Skill {
   name: string;
   description: string;
   body: string;
-  /** path completo do SKILL.md (para debug/refresh) */
+  frontmatter: AgentSkillFrontmatter;
   sourcePath: string;
+  source: SkillSource;
+  /** Presentation metadata; never replaces the stable technical identifier. */
+  displayName: string;
+  summary: string;
 }
 
-const SKILLS_DIRS = [
+export type SkillResource = { path: string; content: string | Buffer };
+export type SkillFileEntry = { path: string; size: number };
+
+const NATIVE_SKILLS_DIRS = [
   process.env.NULLAIN_SKILLS_DIR,
+  join(process.cwd(), ".agents", "skills"),
   join(process.cwd(), "skills"),
-  join(process.cwd(), "skills", "user"),
   join(process.cwd(), "src", "mastra", "skills", "builtin"),
-].filter((d): d is string => Boolean(d));
+].filter((dir): dir is string => Boolean(dir));
 
-/** Cache simples em memória — skills mudam raramente em runtime. */
-let cache: Skill[] | null = null;
+let nativeCache: Skill[] | null = null;
+const userCache = new Map<string, Skill[]>();
 
-function parseFrontmatter(raw: string): { frontmatter: Record<string, string>; body: string } {
-  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) return { frontmatter: {}, body: raw };
-  const frontmatter: Record<string, string> = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^([a-zA-Z_][\w-]*)\s*:\s*(.*)$/);
-    if (kv) frontmatter[kv[1].trim()] = kv[2].trim().replace(/^["']|["']$/g, "");
-  }
-  return { frontmatter, body: m[2].trim() };
+export const MAX_DESCRIPTION_LENGTH = MAX_SKILL_DESCRIPTION_LENGTH;
+export const MAX_SKILL_BODY_LENGTH = 5 * 1024 * 1024;
+export const MAX_SKILL_RESOURCE_BYTES = 5 * 1024 * 1024;
+export const MAX_SKILL_RESOURCES = 200;
+
+function truncate(text: string, max = 150): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1).trimEnd()}…`;
 }
 
-function loadSkillFromDir(dir: string): Skill | null {
-  const skillMd = join(dir, "SKILL.md");
-  if (!existsSync(skillMd)) return null;
+function loadSkillFromDir(dir: string, source: SkillSource): Skill | null {
+  const sourcePath = join(dir, "SKILL.md");
+  if (!existsSync(sourcePath)) return null;
   try {
-    const raw = readFileSync(skillMd, "utf-8");
-    const { frontmatter, body } = parseFrontmatter(raw);
-    const name = frontmatter.name || dir.split(/[\\/]/).pop() || "";
-    if (!name || !frontmatter.description) return null;
+    const directoryName = dir.split(/[\\/]/).pop() || "";
+    const { frontmatter, body } = parseAgentSkill(readFileSync(sourcePath, "utf8"), directoryName);
+    const presentation = frontmatter.metadata ?? {};
     return {
-      name,
+      name: frontmatter.name,
       description: frontmatter.description,
       body,
-      sourcePath: skillMd,
+      frontmatter,
+      sourcePath,
+      source,
+      displayName: presentation["nullain-display-name"] || frontmatter.name,
+      summary: presentation["nullain-summary"] || truncate(frontmatter.description),
     };
   } catch {
     return null;
   }
 }
 
-/** Carrega todas as skills dos diretórios configurados. */
-export function loadSkills(force = false): Skill[] {
-  if (cache && !force) return cache;
-  const skills: Skill[] = [];
+function scanDirs(bases: readonly string[], source: SkillSource): Skill[] {
+  const result: Skill[] = [];
   const seen = new Set<string>();
-  for (const base of SKILLS_DIRS) {
+  for (const base of bases) {
     if (!existsSync(base)) continue;
     for (const entry of readdirSync(base)) {
       const full = join(base, entry);
@@ -87,166 +91,321 @@ export function loadSkills(force = false): Skill[] {
       } catch {
         continue;
       }
-      const skill = loadSkillFromDir(full);
-      if (skill && !seen.has(skill.name)) {
-        seen.add(skill.name);
-        skills.push(skill);
+      const skill = loadSkillFromDir(full, source);
+      if (skill && !seen.has(skill.name.toLowerCase())) {
+        seen.add(skill.name.toLowerCase());
+        result.push(skill);
       }
     }
   }
-  cache = skills;
-  return skills;
+  return result;
 }
 
-/** Busca uma skill pelo nome (case-insensitive). */
-export function getSkill(name: string, disabled: readonly string[] = []): Skill | undefined {
+export function skillOwnerKey(ownerId: string): string {
+  if (!ownerId.trim()) throw new Error("Identidade do proprietário ausente.");
+  return createHash("sha256").update(ownerId).digest("hex").slice(0, 32);
+}
+
+export function userSkillsDir(ownerId: string, create = false): string {
+  const dir = join(process.cwd(), "skills", "user-scoped", skillOwnerKey(ownerId));
+  if (create && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function loadSkills(force = false, ownerId?: string): Skill[] {
+  if (!nativeCache || force) nativeCache = scanDirs(NATIVE_SKILLS_DIRS, "native");
+  if (!ownerId) return [...nativeCache];
+  const key = skillOwnerKey(ownerId);
+  let user = userCache.get(key);
+  if (!user || force) {
+    user = scanDirs([userSkillsDir(ownerId)], "user");
+    userCache.set(key, user);
+  }
+  const nativeNames = new Set(nativeCache.map((skill) => skill.name.toLowerCase()));
+  return [...nativeCache, ...user.filter((skill) => !nativeNames.has(skill.name.toLowerCase()))];
+}
+
+export function getSkill(name: string, disabled: readonly string[] = [], ownerId?: string) {
   const target = name.trim().toLowerCase();
-  return loadSkills()
-    .filter((s) => !disabled.includes(s.name))
-    .find((s) => s.name.toLowerCase() === target);
+  const disabledSet = new Set(disabled.map((item) => item.toLowerCase()));
+  return loadSkills(false, ownerId).find(
+    (skill) => skill.name.toLowerCase() === target && !disabledSet.has(skill.name.toLowerCase()),
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Progressive disclosure de arquivos (references/scripts/assets)
-// ---------------------------------------------------------------------------
-// A spec Agent Skills recomenda mover material detalhado para arquivos
-// separados (references/, scripts/, assets/) e carregá-los sob demanda. O
-// load_skill retorna o corpo do SKILL.md; estes helpers permitem ao agente
-// listar e ler esses arquivos quando a skill instruir.
-
-/** Diretório raiz de uma skill (onde fica o SKILL.md). */
 export function skillRootDir(skill: Skill): string {
   return dirname(skill.sourcePath);
 }
 
-/** Lista os arquivos de apoio de uma skill (references/, scripts/, assets/). */
 export function listSkillFiles(skill: Skill): string[] {
   const root = skillRootDir(skill);
   const out: string[] = [];
-  for (const sub of ["references", "scripts", "assets"]) {
-    // As skills são dados de runtime; não devem fazer o Turbopack incluir o
-    // projeto inteiro no bundle por causa deste caminho dinâmico.
-    const dir = join(/* turbopackIgnore: true */ root, sub);
-    if (!existsSync(/* turbopackIgnore: true */ dir)) continue;
-    walkDir(dir, out);
-  }
-  return out.map((p) => p.slice(root.length + 1).replace(/\\/g, "/"));
+  walkDir(root, out);
+  return out
+    .map((path) => path.slice(root.length + 1).replace(/\\/g, "/"))
+    .filter((path) => path !== "SKILL.md");
 }
 
-/** Lê o conteúdo de um arquivo de apoio da skill (path relativo à raiz). */
-export function readSkillFile(skill: Skill, relPath: string): string | null {
+export function listSkillFileEntries(skill: Skill): SkillFileEntry[] {
   const root = skillRootDir(skill);
-  const target = resolve(root, relPath);
-  // Guarda anti-traversal: o arquivo precisa estar dentro da raiz da skill
-  if (!target.startsWith(root + sep)) return null;
-  if (!existsSync(target) || !statSync(target).isFile()) return null;
+  return listSkillFiles(skill).map((path) => ({
+    path,
+    size: statSync(resolve(root, path)).size,
+  }));
+}
+
+export function readSkillDocument(skill: Skill): string {
+  return readFileSync(skill.sourcePath, "utf8");
+}
+
+export function readSkillFile(skill: Skill, relativePath: string): string | null {
+  const root = resolve(skillRootDir(skill));
+  const target = resolve(root, relativePath);
+  if (!target.startsWith(root + sep) || !existsSync(target) || !statSync(target).isFile())
+    return null;
   try {
-    return readFileSync(target, "utf-8");
+    const realRoot = realpathSync(root);
+    const realTarget = realpathSync(target);
+    if (!realTarget.startsWith(realRoot + sep)) return null;
+    return readFileSync(target, "utf8");
   } catch {
     return null;
   }
 }
 
-function walkDir(dir: string, acc: string[]): void {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
+function walkDir(directory: string, output: string[]): void {
+  for (const entry of readdirSync(directory)) {
+    const full = join(directory, entry);
     try {
-      if (statSync(full).isDirectory()) walkDir(full, acc);
-      else acc.push(full);
-    } catch {
-      // ignora entries ilegíveis
-    }
+      if (statSync(full).isDirectory()) walkDir(full, output);
+      else if (output.length < 2_000) output.push(full);
+    } catch {}
   }
 }
 
-// ---------------------------------------------------------------------------
-// User skills — criação/remoção em runtime por ação explícita na UI
-// ---------------------------------------------------------------------------
-
-/**
- * Nome válido de skill — segue a spec Agent Skills:
- * - 1-64 caracteres
- * - apenas a-z, 0-9 e hífen
- * - não começa nem termina com hífen
- * - sem hífens consecutivos
- * (mata path traversal por construção)
- */
 export function isValidSkillName(name: string): boolean {
-  if (typeof name !== "string" || name.length < 1 || name.length > 64) return false;
-  // a-z, 0-9 e hífens simples entre grupos alfanuméricos — sem hífen no
-  // início/fim e sem hífens consecutivos (spec Agent Skills)
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
+  return isValidAgentSkillName(name);
 }
 
-/** Limite da description conforme a spec Agent Skills (máx 1024 chars). */
-export const MAX_DESCRIPTION_LENGTH = 1024;
-
-/** Diretório base das skills criadas pelo usuário (sempre dentro do projeto). */
-export function userSkillsDir(): string {
-  const dir = join(process.cwd(), "skills", "user");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return dir;
+export class DuplicateSkillError extends Error {
+  constructor(name: string) {
+    super(`Já existe uma skill com o identificador "${name}".`);
+    this.name = "DuplicateSkillError";
+  }
 }
 
-/**
- * Escreve (cria ou substitui) uma skill de usuário.
- * Retorna o caminho do SKILL.md gravado. Invalida o cache do loader.
- */
-export function writeUserSkill(name: string, description: string, body: string): string {
-  if (!isValidSkillName(name)) {
-    throw new Error(`Nome de skill inválido: "${name}" (use kebab-case: a-z, 0-9, hífen)`);
+export function assertSkillNameAvailable(name: string, ownerId?: string): void {
+  if (loadSkills(true, ownerId).some((skill) => skill.name.toLowerCase() === name.toLowerCase())) {
+    throw new DuplicateSkillError(name);
   }
-  if (!description.trim()) throw new Error("description é obrigatória");
-  if (description.length > MAX_DESCRIPTION_LENGTH) {
-    throw new Error(`description muito longa (máx ${MAX_DESCRIPTION_LENGTH} chars)`);
-  }
-  if (!body.trim()) throw new Error("body é obrigatório");
-  if (body.length > 200_000) throw new Error("corpo da skill muito grande (máx 200k chars)");
-
-  const base = userSkillsDir();
-  const dir = join(base, name);
-  // Guarda anti-traversal: o nome validado não contém / nem .., mas garante
-  const resolved = join(dir, "SKILL.md");
-  if (!resolved.startsWith(base)) {
-    throw new Error("Caminho de skill inválido");
-  }
-  mkdirSync(dir, { recursive: true });
-  const md = `---\nname: ${name}\ndescription: ${description.replace(/\r?\n/g, " ")}\n---\n\n${body}\n`;
-  writeFileSync(join(dir, "SKILL.md"), md, "utf-8");
-  loadSkills(true); // invalida cache
-  return join(dir, "SKILL.md");
 }
 
-/** Remove uma skill de usuário. Skills builtin não podem ser removidas aqui. */
-export function deleteUserSkill(name: string): boolean {
+function validateResourcePath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (
+    normalized.length > 240 ||
+    normalized === "SKILL.md" ||
+    !/^[a-zA-Z0-9._/-]+$/.test(normalized) ||
+    normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new Error(`Caminho de recurso inválido: "${path}".`);
+  }
+  return normalized;
+}
+
+/** Atomic and idempotent for an identical retry. It never overwrites a skill. */
+export function writeUserSkill(
+  ownerId: string,
+  name: string,
+  description: string,
+  body: string,
+  options: {
+    displayName?: string;
+    summary?: string;
+    license?: string;
+    compatibility?: string;
+    metadata?: Record<string, string>;
+    allowedTools?: string;
+    resources?: SkillResource[];
+  } = {},
+): { path: string; created: boolean } {
+  if (!body.trim()) throw new Error("Skill instructions are required.");
+  const metadata = { ...options.metadata };
+  if (options.displayName?.trim()) metadata["nullain-display-name"] = options.displayName.trim();
+  if (options.summary?.trim()) metadata["nullain-summary"] = options.summary.trim();
+  const markdown = createAgentSkillDocument(
+    {
+      name,
+      description,
+      ...(options.license ? { license: options.license } : {}),
+      ...(options.compatibility ? { compatibility: options.compatibility } : {}),
+      ...(Object.keys(metadata).length ? { metadata } : {}),
+      ...(options.allowedTools ? { "allowed-tools": options.allowedTools } : {}),
+    },
+    body,
+  );
+  return writeUserSkillDocument(ownerId, markdown, options.resources);
+}
+
+/** Installs a complete spec-valid SKILL.md without discarding optional frontmatter. */
+export function writeUserSkillDocument(
+  ownerId: string,
+  markdown: string,
+  resources: SkillResource[] = [],
+  expectedDirectoryName?: string,
+): { path: string; created: boolean } {
+  const parsed = parseAgentSkill(markdown, expectedDirectoryName);
+  const name = parsed.frontmatter.name;
+  if (parsed.body.length > MAX_SKILL_BODY_LENGTH) throw new Error("SKILL.md body is too large.");
+  if (resources.length > MAX_SKILL_RESOURCES) throw new Error("Recursos demais na skill.");
+  let resourceBytes = 0;
+  const resourcePaths = new Set<string>();
+  const normalizedResources = resources.map((resource) => {
+    resourceBytes +=
+      typeof resource.content === "string"
+        ? Buffer.byteLength(resource.content, "utf8")
+        : resource.content.byteLength;
+    const path = validateResourcePath(resource.path);
+    const key = path.toLowerCase();
+    if (resourcePaths.has(key)) throw new Error(`Duplicate skill resource: "${path}".`);
+    resourcePaths.add(key);
+    return { path, content: resource.content };
+  });
+  if (resourceBytes > MAX_SKILL_RESOURCE_BYTES) throw new Error("Recursos da skill excedem 1 MB.");
+  const base = resolve(userSkillsDir(ownerId, true));
+  const directory = resolve(base, name);
+  if (!directory.startsWith(base + sep)) throw new Error("Caminho de skill inválido.");
+
+  if (existsSync(directory)) {
+    const existingPath = join(directory, "SKILL.md");
+    const existing = loadSkillFromDir(directory, "user");
+    const existingResources = existing ? listSkillFiles(existing).sort() : [];
+    const requestedResources = normalizedResources.map((resource) => resource.path).sort();
+    const sameResources =
+      existingResources.length === requestedResources.length &&
+      existingResources.every(
+        (path, index) =>
+          path === requestedResources[index] &&
+          readFileSync(resolve(directory, path)).equals(
+            Buffer.from(
+              normalizedResources.find((resource) => resource.path === path)?.content ?? "",
+            ),
+          ),
+      );
+    if (
+      existsSync(existingPath) &&
+      readFileSync(existingPath, "utf8") === markdown &&
+      sameResources
+    ) {
+      return { path: existingPath, created: false };
+    }
+    throw new DuplicateSkillError(name);
+  }
+  if (loadSkills(true).some((skill) => skill.name.toLowerCase() === name.toLowerCase())) {
+    throw new DuplicateSkillError(name);
+  }
+
+  const temporary = resolve(base, `.creating-${name}-${randomUUID()}`);
+  try {
+    mkdirSync(temporary);
+    writeFileSync(join(temporary, "SKILL.md"), markdown, "utf8");
+    for (const resource of normalizedResources) {
+      const target = resolve(temporary, resource.path);
+      if (!target.startsWith(temporary + sep)) throw new Error("Caminho de recurso inválido.");
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, resource.content, "utf8");
+    }
+    renameSync(temporary, directory);
+  } catch (error) {
+    if (existsSync(temporary)) rmSync(temporary, { recursive: true, force: true });
+    if (existsSync(directory)) throw new DuplicateSkillError(name);
+    throw error;
+  }
+  userCache.delete(skillOwnerKey(ownerId));
+  return { path: join(directory, "SKILL.md"), created: true };
+}
+
+export function deleteUserSkill(ownerId: string, name: string): boolean {
   if (!isValidSkillName(name)) return false;
-  const base = userSkillsDir();
-  const dir = join(base, name);
-  if (!existsSync(dir)) return false;
-  rmSync(dir, { recursive: true, force: true });
-  loadSkills(true);
+  const base = resolve(userSkillsDir(ownerId));
+  const directory = resolve(base, name);
+  if (!directory.startsWith(base + sep) || !existsSync(join(directory, "SKILL.md"))) return false;
+  rmSync(directory, { recursive: true, force: true });
+  try {
+    if (readdirSync(base).length === 0) rmdirSync(base);
+    const scopedRoot = dirname(base);
+    if (readdirSync(scopedRoot).length === 0) rmdirSync(scopedRoot);
+  } catch {}
+  userCache.delete(skillOwnerKey(ownerId));
   return true;
 }
 
-/** Lista skills criadas pelo usuário (não builtin). */
-export function listUserSkillNames(): string[] {
-  const base = userSkillsDir();
-  try {
-    return readdirSync(base).filter((e) => statSync(join(base, e)).isDirectory());
-  } catch {
-    return [];
-  }
+export function listUserSkillNames(ownerId: string): string[] {
+  return loadSkills(true, ownerId)
+    .filter((skill) => skill.source === "user")
+    .map((skill) => skill.name);
 }
 
-/** Índice leve para o system prompt (~40 tokens por skill). */
-export function skillsIndexPrompt(disabled: readonly string[] = []): string {
-  const skills = loadSkills().filter((s) => !disabled.includes(s.name));
+export function skillsIndexPrompt(disabled: readonly string[] = [], ownerId?: string): string {
+  const disabledSet = new Set(disabled.map((name) => name.toLowerCase()));
+  const skills = loadSkills(false, ownerId).filter(
+    (skill) => !disabledSet.has(skill.name.toLowerCase()),
+  );
   if (!skills.length) return "";
-  const lines = skills.map((s) => `- ${s.name}: ${s.description}`);
   return [
+    "## Available Agent Skills",
+    "The following skills provide specialized instructions for specific tasks.",
+    "When a task matches a skill description, call load_skill with its exact name before proceeding.",
+    "<available_skills>",
+    ...skills.map(
+      (skill) =>
+        `  <skill><name>${escapeXml(skill.name)}</name><description>${escapeXml(skill.description)}</description></skill>`,
+    ),
+    "</available_skills>",
+  ].join("\n");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export function skillContentEnvelope(skill: Skill): string {
+  const files = listSkillFiles(skill);
+  return [
+    `<skill_content name="${escapeXml(skill.name)}">`,
+    skill.body,
     "",
-    "## Skills disponíveis",
-    "Você possui skills (procedimentos especializados). Se a pergunta do usuário casar com uma delas, chame a tool load_skill com o nome correto ANTES de responder, e siga as instruções da skill.",
-    ...lines,
+    "Relative resource paths are resolved from this skill's directory.",
+    ...(files.length
+      ? [
+          "<skill_resources>",
+          ...files.map((file) => `  <file>${escapeXml(file)}</file>`),
+          "</skill_resources>",
+        ]
+      : []),
+    "</skill_content>",
+  ].join("\n");
+}
+
+/**
+ * Server-authoritative instructions for an explicit per-message selection.
+ * The state notice deliberately precedes the skill body so stale conversation
+ * history (for example, the creation receipt saying "disabled by default")
+ * cannot be mistaken for the current availability state.
+ */
+export function selectedSkillPrompt(skill: Skill): string {
+  return [
+    "## Explicit Agent Skill activation",
+    `The server has validated '${skill.name}' for this account.`,
+    "AUTHORITATIVE CURRENT STATE: ENABLED AND AVAILABLE.",
+    "Apply this skill to the current request. Ignore stale conversation messages or tool results claiming it was disabled, and do not ask the user to enable it again.",
+    "This explicit selection applies only to the current message and does not imply that execution succeeded.",
+    "",
+    skillContentEnvelope(skill),
   ].join("\n");
 }

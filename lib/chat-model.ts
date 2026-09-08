@@ -89,6 +89,7 @@ export function saveIntegrations(enabled: boolean): void {
 // --- Skills ---
 
 const SKILLS_KEY = "nullain-skills-disabled";
+const SKILLS_SEEN_KEY = "nullain-skills-seen";
 
 /** Skills desativadas pelo usuário (nomes). Default: todas ativas. */
 export function loadDisabledSkills(): string[] {
@@ -109,6 +110,67 @@ export function saveDisabledSkills(disabled: string[]): void {
   } catch {
     // sem persistência
   }
+}
+
+export function filterEnabledSkills<T extends { name: string }>(
+  skills: readonly T[],
+  disabled: readonly string[],
+): T[] {
+  const disabledNames = new Set(disabled.map((name) => name.toLowerCase()));
+  return skills.filter((skill) => !disabledNames.has(skill.name.toLowerCase()));
+}
+
+export function applySkillCatalogDefaults(
+  skills: readonly { name: string; source?: "native" | "user"; user?: boolean }[],
+): string[] {
+  const disabled = new Set(loadDisabledSkills());
+  let seen = new Set<string>();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILLS_SEEN_KEY) ?? "[]") as unknown;
+    if (Array.isArray(parsed))
+      seen = new Set(parsed.filter((item): item is string => typeof item === "string"));
+  } catch {}
+  for (const skill of skills) {
+    const isUser = skill.source === "user" || skill.user === true;
+    if (isUser && !seen.has(skill.name)) disabled.add(skill.name);
+    seen.add(skill.name);
+  }
+  const result = [...disabled];
+  saveDisabledSkills(result);
+  try {
+    localStorage.setItem(SKILLS_SEEN_KEY, JSON.stringify([...seen]));
+  } catch {}
+  return result;
+}
+
+export function markNewSkillDisabled(name: string): void {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILLS_SEEN_KEY) ?? "[]") as unknown;
+    const seen = new Set(
+      Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === "string")
+        : [],
+    );
+    // O resultado de create_skill permanece no histórico e seu renderer
+    // remonta ao voltar ao chat. O default vale só na primeira aparição;
+    // reaplicá-lo aqui desativaria silenciosamente uma skill já habilitada.
+    if (seen.has(name)) return;
+    saveDisabledSkills([...new Set([...loadDisabledSkills(), name])]);
+    seen.add(name);
+    localStorage.setItem(SKILLS_SEEN_KEY, JSON.stringify([...seen]));
+  } catch {}
+  window.dispatchEvent(new CustomEvent("nullain-skills-changed", { detail: { name } }));
+}
+
+export function forgetSkillPreference(name: string): void {
+  saveDisabledSkills(loadDisabledSkills().filter((item) => item !== name));
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILLS_SEEN_KEY) ?? "[]") as unknown;
+    const seen = Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string" && item !== name)
+      : [];
+    localStorage.setItem(SKILLS_SEEN_KEY, JSON.stringify(seen));
+  } catch {}
 }
 
 // --- Geração de imagem/vídeo (WaveSpeed) ---

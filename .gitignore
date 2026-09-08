@@ -48,3 +48,4 @@ next-env.d.ts
 .nullain/
 mastra.db
 mastra.db-*
+/skills/user-scoped/

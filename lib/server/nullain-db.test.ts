@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { migrateNullainDatabase, openNullainDatabase } from "./nullain-db";
+import { migrationChecksum, migrateNullainDatabase, openNullainDatabase } from "./nullain-db";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -11,6 +11,12 @@ afterEach(() => {
 });
 
 describe("Nullain app database migrations", () => {
+  it("keeps migration checksums stable across LF and CRLF checkouts", () => {
+    expect(migrationChecksum("CREATE TABLE example (id TEXT);\n")).toBe(
+      migrationChecksum("CREATE TABLE example (id TEXT);\r\n"),
+    );
+  });
+
   it("applies versioned migrations idempotently to a real SQLite database", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nullain-db-"));
     directories.push(directory);

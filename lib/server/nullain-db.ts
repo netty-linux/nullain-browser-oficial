@@ -32,8 +32,8 @@ function migrationDirectory() {
   return path.join(process.cwd(), "db", "migrations");
 }
 
-function checksum(sql: string) {
-  return createHash("sha256").update(sql).digest("hex");
+export function migrationChecksum(sql: string) {
+  return createHash("sha256").update(sql.replace(/\r\n?/g, "\n")).digest("hex");
 }
 
 export function migrateNullainDatabase(database: Database.Database) {
@@ -54,7 +54,7 @@ export function migrateNullainDatabase(database: Database.Database) {
 
   for (const name of REQUIRED_MIGRATIONS) {
     const sql = fs.readFileSync(path.join(migrationDirectory(), name), "utf8");
-    const digest = checksum(sql);
+    const digest = migrationChecksum(sql);
     const existing = find.get(name) as { checksum: string } | undefined;
     if (existing) {
       if (existing.checksum !== digest)
@@ -77,7 +77,7 @@ export function assertNullainDatabaseReady(database = getNullainDatabase()) {
   const applied = new Map(rows.map((row) => [row.name, row.checksum]));
   for (const name of REQUIRED_MIGRATIONS) {
     const sql = fs.readFileSync(path.join(migrationDirectory(), name), "utf8");
-    if (applied.get(name) !== checksum(sql)) {
+    if (applied.get(name) !== migrationChecksum(sql)) {
       throw new Error(`Migration ausente ou incompatível: ${name}`);
     }
   }

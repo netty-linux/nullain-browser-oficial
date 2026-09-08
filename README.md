@@ -8,13 +8,12 @@ Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant
 
 <img width="1919" height="917" alt="image" src="https://github.com/user-attachments/assets/a609f1c6-3c15-40d5-a2eb-fcaaf4a335fc" />
 
-
 ## Recursos
 
 - Kernel supervisor com processos especializados de pesquisa, código e síntese.
 - Pesquisa pela web exclusivamente pelo Computador/OpenBot, controlada pelo usuário.
 - Memória persistente em LibSQL por conversa.
-- Skills com carregamento progressivo e suporte a upload de pacotes.
+- Biblioteca de Skills com nativas protegidas, catálogo privado por conta e seleção por `/` no chat.
 - Plugins via Composio MCP.
 - Geração de imagem e vídeo via WaveSpeed.
 - Streaming de resposta, raciocínio e tool calls na interface.
@@ -52,6 +51,36 @@ Usuário → /api/chat → kernelAgent
 - `app/api/ag-ui`: integração autenticada com clientes AG-UI.
 
 O `chatAgent` permanece registrado somente para compatibilidade com clientes legados.
+
+## Skills
+
+A página `/skills` reúne skills nativas e skills importadas pela conta autenticada.
+Skills nativas são versionadas com a aplicação e não podem ser editadas, substituídas
+ou excluídas. Skills do usuário ficam isoladas por conta em `skills/user-scoped/` e
+entram desativadas por padrão. O estado ativado/desativado é uma preferência local
+salva no navegador e passa a valer no próximo envio.
+
+O loader segue a especificação aberta [Agent Skills](https://agentskills.io/specification):
+cada habilidade é uma pasta cujo `SKILL.md` possui frontmatter YAML com `name` e
+`description`, além dos campos opcionais `license`, `compatibility`, `metadata` e
+`allowed-tools`. O identificador deve coincidir com o nome da pasta. Metadados visuais
+da Nullain usam `metadata.nullain-display-name` e `metadata.nullain-summary`, sem criar
+campos proprietários no nível raiz. A descoberta também inclui `.agents/skills/`.
+
+No composer do chat, digite `/` no início da mensagem para abrir o seletor. A busca
+considera identificador, nome amigável e resumo. A seleção vira um chip removível,
+vale somente para aquela mensagem e é enviada como metadado estruturado; o servidor
+confirma novamente que a skill existe, pertence à conta e está ativa antes de
+injetar suas instruções.
+
+A skill nativa `skill-creator` permite criar uma habilidade reutilizável a partir de
+um pedido explícito no chat. Durante esse fluxo, duas ferramentas de consulta do MCP
+oficial do Agent Skills ficam disponíveis para pesquisar a documentação; o MCP é
+somente leitura e não substitui a validação local. A criação exige sessão autenticada,
+valida a especificação, nunca substitui skills existentes, não executa scripts enviados
+e registra a nova skill desativada. Também é possível importar `.md`, `.markdown` ou
+`.zip`; o YAML e os recursos válidos do pacote são preservados, enquanto pacotes
+inválidos, inseguros ou duplicados são recusados.
 
 ## Nullain Code
 

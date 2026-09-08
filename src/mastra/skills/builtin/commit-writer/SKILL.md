@@ -1,57 +1,31 @@
 ---
 name: commit-writer
-description: Escreve mensagens de commit convencionais (conventional commits) a partir do diff ou da descrição das mudanças. Use quando o usuário pedir para criar/escrever uma mensagem de commit, commit message, ou resumir mudanças para commit.
+description: Write Conventional Commit messages from a diff or a description of code changes. Use when the user asks for a commit message, wants to commit changes, or needs a commit-ready summary.
+metadata:
+  nullain-display-name: "Commit Writer"
+  nullain-summary: "Writes focused Conventional Commit messages from code changes."
 ---
 
-# Commit Writer — conventional commits
+# Commit Writer
 
-## Quando usar
+Create a commit message that reflects the actual change and its intent.
 
-O usuário pede mensagem de commit, quer commitar mudanças, ou descreve o que mudou e quer o resumo formatado.
+## Procedure
 
-## Formato
+1. Inspect the diff or the user's change description. Identify the unifying behavior change rather than listing files.
+2. Choose the narrowest accurate type: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `chore`, or `style`.
+3. Add a scope only when one clear module owns the change.
+4. Write the subject in imperative mood, lowercase, without a trailing period, and keep it within 72 characters.
+5. Add a body only when the motivation, tradeoff, or non-obvious behavior needs explanation. Wrap body lines near 72 characters.
+6. Use `BREAKING CHANGE:` or an issue footer only when supported by the provided changes.
+7. If the changes are unrelated, propose separate commits instead of hiding them under one vague subject.
 
-```
-<tipo>(<escopo opcional>): <descrição em imperativo, minúscula, sem ponto final>
+Use the language requested by the user; otherwise match the language of the conversation. Preserve Conventional Commit types in English.
 
-[corpo opcional: o PORQUÊ da mudança, wrap em 72 chars]
+```text
+<type>(<optional-scope>): <imperative subject>
 
-[Bulk opcional: BREAKING CHANGE: descrição / Closes #123]
-```
+<optional body explaining why>
 
-## Tipos
-
-| Tipo       | Uso                                     |
-| ---------- | --------------------------------------- |
-| `feat`     | nova funcionalidade                     |
-| `fix`      | correção de bug                         |
-| `refactor` | mudança interna sem mudar comportamento |
-| `perf`     | melhoria de performance                 |
-| `docs`     | documentação                            |
-| `test`     | testes                                  |
-| `chore`    | build, deps, config, tooling            |
-| `style`    | formatação, espaços                     |
-
-## Procedimento
-
-1. Se o usuário colou um diff: identifique os arquivos mais significativos e o tema unificador — não liste arquivo por arquivo.
-2. Descrição: o que MUDA, em imperativo ("adiciona toggle", não "adicionado toggle"). Máx 72 chars.
-3. Corpo (se a mudança for complexa): explique o porquê, não o como.
-4. Escopo: use o módulo principal entre parênteses quando óbvio (ex.: `feat(web-search):`).
-5. Múltiplas mudanças não-relacionadas → proponha commits separados.
-
-## Exemplos
-
-```
-feat(computer): adiciona navegação com browser real
-
-centraliza pesquisas no OpenBot e mantém o acesso à web controlado
-pelo toggle do usuário.
-```
-
-```
-fix(chat): evita resposta vazia quando modelo estoura steps
-
-gpt-oss com effort high raciocinava além do maxSteps sem emitir
-texto. Retry sem tools com digest dos resultados coletados.
+<optional footer>
 ```

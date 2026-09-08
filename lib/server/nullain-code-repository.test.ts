@@ -10,6 +10,7 @@ vi.stubEnv("NULLAIN_APP_DB_PATH", databasePath);
 
 import {
   createConversation,
+  deleteConversation,
   listConversations,
   provisionProjectDirectory,
   requireProject,
@@ -54,5 +55,14 @@ describe("Nullain project ownership", () => {
     createConversation("user-one", "project-one");
     expect(listConversations("user-one", "project-one")).toHaveLength(1);
     expect(() => listConversations("user-two", "project-one")).toThrow();
+  });
+
+  it("deletes only a conversation owned by the authenticated user", () => {
+    const conversation = createConversation("user-one", "project-one");
+    expect(() => deleteConversation("user-two", conversation.id)).toThrow();
+    deleteConversation("user-one", conversation.id);
+    expect(listConversations("user-one", "project-one")).not.toContainEqual(
+      expect.objectContaining({ id: conversation.id }),
+    );
   });
 });

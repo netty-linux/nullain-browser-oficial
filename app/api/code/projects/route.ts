@@ -1,13 +1,22 @@
-import { createProject, listProjects } from "@/lib/server/nullain-code-repository";
+import {
+  createProject,
+  getProjectPath,
+  listProjects,
+  type NullainProject,
+} from "@/lib/server/nullain-code-repository";
 import { requireNullainSession } from "@/lib/server/nullain-auth";
 import { isInvalidCookieMutationOrigin } from "@/lib/server/request-security";
 import { nullainRoute } from "@/lib/server/nullain-route";
 
 export const runtime = "nodejs";
 
+function projectForClient(project: NullainProject) {
+  return { ...project, directoryPath: getProjectPath(project) };
+}
+
 export const GET = nullainRoute(async (request: Request) => {
   const session = await requireNullainSession(request);
-  return Response.json({ projects: listProjects(session.user.id) });
+  return Response.json({ projects: listProjects(session.user.id).map(projectForClient) });
 });
 
 export const POST = nullainRoute(async (request: Request) => {
@@ -17,7 +26,7 @@ export const POST = nullainRoute(async (request: Request) => {
   const body = (await request.json()) as { name?: unknown };
   try {
     return Response.json(
-      { project: await createProject(session.user.id, body.name) },
+      { project: projectForClient(await createProject(session.user.id, body.name)) },
       { status: 201 },
     );
   } catch (error) {

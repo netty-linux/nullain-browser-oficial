@@ -6,10 +6,11 @@ import { mastra } from "@/src/mastra";
 import { REASONING_MODELS, ollamaProviderOptions } from "@/src/mastra/models";
 import { thinkingExtractor } from "@/src/mastra/transforms/thinking-stream";
 import { KERNEL_INSTRUCTIONS, kernelStreamOptions } from "@/src/mastra/agents/kernel-agent";
-import { skillsIndexPrompt } from "@/src/mastra/skills/loader";
+import { getSkill, selectedSkillPrompt, skillsIndexPrompt } from "@/src/mastra/skills/loader";
 import { createSkillsToolset } from "@/src/mastra/tools/skill-tools";
 import { openbotComputerClientTools } from "@/src/mastra/tools/computer-client-tools";
 import { getComposioTools } from "@/src/mastra/integrations/composio-mcp";
+import { getAgentSkillsDocsTools } from "@/src/mastra/integrations/agent-skills-mcp";
 import { sanitizeIntegrationKey } from "@/lib/integration-key";
 import { createWaveSpeedToolset } from "@/src/mastra/tools/wavespeed-tools";
 import { CHAT_MODEL_IDS, DEFAULT_VISION_CHAT_MODEL, isVisionChatModel } from "@/lib/model-catalog";
@@ -19,6 +20,7 @@ import {
   pruneMessageHistory,
 } from "@/lib/server/chat-message-history";
 import { VISION_INPUT_CONTEXT_KEY } from "@/src/mastra/processors/strip-image-parts";
+import { getNullainSession } from "@/lib/server/nullain-auth";
 
 // Modelos pesados (nemotron-3-ultra, glm-5.1...) podem passar de 30s no
 // primeiro token; com 30 a função morria no meio do stream e a resposta
@@ -166,6 +168,53 @@ function logPruneStats(
   );
 }
 
+function latestUserText(messages: unknown[]): string {
+  const message = [...messages]
+    .reverse()
+    .find(
+      (item) => item && typeof item === "object" && (item as { role?: unknown }).role === "user",
+    ) as { parts?: unknown[] } | undefined;
+  return (message?.parts ?? [])
+    .filter((part): part is { type: "text"; text: string } =>
+      Boolean(
+        part &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string",
+      ),
+    )
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function selectedSkillId(messages: unknown[]): string | null {
+  const message = [...messages]
+    .reverse()
+    .find(
+      (item) => item && typeof item === "object" && (item as { role?: unknown }).role === "user",
+    ) as { metadata?: unknown } | undefined;
+  const metadata = message?.metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const custom = (metadata as { custom?: unknown }).custom;
+  if (!custom || typeof custom !== "object") return null;
+  const selected = (custom as { selectedSkill?: unknown }).selectedSkill;
+  if (!selected || typeof selected !== "object") return null;
+  const id = (selected as { id?: unknown }).id;
+  return typeof id === "string" ? id : null;
+}
+
+function explicitlyRequestsSkillCreation(text: string): boolean {
+  const normalized = text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return (
+    /\b(cri(e|ar|a)|mont(e|ar)|registre|adicione|transforme|build|create|make|register)\b/.test(
+      normalized,
+    ) && /\b(skill|skills|habilidade|procedimento reutilizavel)\b/.test(normalized)
+  );
+}
+
 export async function POST(req: Request) {
   // A leitura do body FORA de try/catch gerava o 500 opaco com "(ref: uuid)"
   // do Next 16 quando o payload estourava (histórico reenviando imagens em
@@ -237,6 +286,31 @@ export async function POST(req: Request) {
     return Response.json({ error: "Modelo não permitido." }, { status: 400 });
   }
   const currentMessages = Array.isArray(messages) ? messages : [];
+  const session = await getNullainSession(req.headers).catch(() => null);
+  const ownerId = session?.user.id;
+  const disabled = Array.isArray(disabledSkills)
+    ? disabledSkills.filter((skill): skill is string => typeof skill === "string")
+    : [];
+  const explicitSkillId = selectedSkillId(currentMessages);
+  const selectedSkill = explicitSkillId ? getSkill(explicitSkillId, [], ownerId) : undefined;
+  if (explicitSkillId && !selectedSkill) {
+    return Response.json(
+      {
+        error:
+          "A skill selecionada não está mais disponível para esta conta. Seu texto foi preservado.",
+      },
+      { status: 409 },
+    );
+  }
+  if (
+    selectedSkill &&
+    disabled.some((name) => name.toLowerCase() === selectedSkill.name.toLowerCase())
+  ) {
+    return Response.json(
+      { error: "Ative a skill selecionada antes de enviar. Seu texto foi preservado." },
+      { status: 409 },
+    );
+  }
   const hasCurrentImage = hasLatestUserImage(currentMessages);
   let selectedModel = normalized ?? process.env.MASTRA_MODEL ?? "ollama-cloud/gpt-oss:20b";
   if (hasCurrentImage && !isVisionChatModel(selectedModel)) {
@@ -308,9 +382,6 @@ export async function POST(req: Request) {
   // disclosure — o índice custa ~40 tokens/skill; o corpo só entra quando o
   // agente chama load_skill). Skills desativadas no popover são filtradas
   // do índice E do load_skill.
-  const disabled = Array.isArray(disabledSkills)
-    ? disabledSkills.filter((s): s is string => typeof s === "string")
-    : [];
   // Toolsets condicionais aos toggles do composer:
   // - skills: SEMPRE ativos (progressive disclosure).
   // - composio (1000+ integrações): SOMENTE quando o toggle Plugins está
@@ -323,11 +394,22 @@ export async function POST(req: Request) {
   const sessionIntegrationKey = sanitizeIntegrationKey(
     req.headers.get("x-nullain-integration-key"),
   );
+  const allowSkillCreation =
+    Boolean(ownerId) &&
+    !disabled.some((name) => name.toLowerCase() === "skill-creator") &&
+    explicitlyRequestsSkillCreation(latestUserText(currentMessages));
   const composioTools = integrations ? await getComposioTools(sessionIntegrationKey) : {};
+  const agentSkillsDocsTools = allowSkillCreation ? await getAgentSkillsDocsTools() : {};
   streamOptions.toolsets = {
-    ...createSkillsToolset(disabled),
+    ...createSkillsToolset(disabled, {
+      ownerId,
+      allowCreate: allowSkillCreation,
+    }),
     ...(generation ? createWaveSpeedToolset(attachedImageDataUrl) : {}),
     ...(Object.keys(composioTools).length > 0 ? { composio: composioTools } : {}),
+    ...(Object.keys(agentSkillsDocsTools).length > 0
+      ? { agentSkillsDocs: agentSkillsDocsTools }
+      : {}),
   };
   // Tools CLIENT (executadas no browser): o servidor declara ao modelo e emite
   // a tool-call, mas NÃO executa — o frontend executa via proxy (cookie de
@@ -379,7 +461,8 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
     : "";
   const requestInstructions = [
     KERNEL_INSTRUCTIONS,
-    skillsIndexPrompt(disabled),
+    skillsIndexPrompt(disabled, ownerId),
+    selectedSkill ? selectedSkillPrompt(selectedSkill) : "",
     computerInstructions,
     integrationsInstructions,
     generationInstructions,

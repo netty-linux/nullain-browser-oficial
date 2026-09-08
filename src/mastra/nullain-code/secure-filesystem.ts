@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
+import { createTwoFilesPatch } from "diff";
 import {
   LocalFilesystem,
   type CopyOptions,
@@ -16,6 +17,15 @@ const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 export type WriteCapability = { level: "none" | "plan" | "build" };
 
+export type TrackedFileChange = {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  operations: string[];
+  patch?: string;
+  binary: boolean;
+  truncated: boolean;
+};
+
 function digest(content: Buffer) {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -24,6 +34,10 @@ export class SecureProjectFilesystem extends LocalFilesystem {
   private static readonly operationQueues = new Map<string, Promise<void>>();
   private readonly capability: WriteCapability;
   private readonly observedHashes = new Map<string, string>();
+  private readonly trackedChanges = new Map<
+    string,
+    { original: Buffer | null; operations: string[] }
+  >();
 
   constructor(basePath: string, capability: WriteCapability) {
     super({ basePath, contained: true, allowedPaths: [] });
@@ -88,6 +102,58 @@ export class SecureProjectFilesystem extends LocalFilesystem {
     throw new Error("Escrita bloqueada: aprove o plano desta execução primeiro.");
   }
 
+  private async readCurrentFile(relative: string) {
+    try {
+      return await fs.readFile(this.absolute(relative));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private rememberChange(relative: string, original: Buffer | null, operation: string) {
+    if (relative.startsWith(".mastracode/")) return;
+    const existing = this.trackedChanges.get(relative);
+    if (existing) existing.operations.push(operation);
+    else this.trackedChanges.set(relative, { original, operations: [operation] });
+  }
+
+  resetTrackedChanges() {
+    this.trackedChanges.clear();
+  }
+
+  async getTrackedChanges(): Promise<TrackedFileChange[]> {
+    const changes: TrackedFileChange[] = [];
+    for (const [relative, tracked] of this.trackedChanges) {
+      const current = await this.readCurrentFile(relative);
+      if (
+        (!tracked.original && !current) ||
+        (tracked.original !== null && current !== null && tracked.original.equals(current))
+      ) {
+        continue;
+      }
+      const status = !tracked.original ? "added" : !current ? "deleted" : "modified";
+      const binary = Boolean(tracked.original?.includes(0) || current?.includes(0));
+      const truncated = (tracked.original?.length ?? 0) + (current?.length ?? 0) > 400_000;
+      const before = tracked.original?.toString("utf8") ?? "";
+      const after = current?.toString("utf8") ?? "";
+      changes.push({
+        path: relative,
+        status,
+        operations: [...tracked.operations],
+        patch:
+          binary || truncated
+            ? undefined
+            : createTwoFilesPatch(`a/${relative}`, `b/${relative}`, before, after, "", "", {
+                context: 3,
+              }),
+        binary,
+        truncated,
+      });
+    }
+    return changes.sort((left, right) => left.path.localeCompare(right.path));
+  }
+
   private async serialized<T>(key: string, operation: () => Promise<T>) {
     const lockKey = this.absolute(key).toLowerCase();
     const previous = SecureProjectFilesystem.operationQueues.get(lockKey) ?? Promise.resolve();
@@ -120,6 +186,9 @@ export class SecureProjectFilesystem extends LocalFilesystem {
     return this.serialized(relative, async () => {
       const destination = this.absolute(relative);
       const parent = path.dirname(destination);
+      const original = this.trackedChanges.has(relative)
+        ? null
+        : await this.readCurrentFile(relative);
       if (options?.recursive) await fs.mkdir(parent, { recursive: true });
       await this.rejectLinks(path.dirname(relative), true);
       try {
@@ -149,6 +218,7 @@ export class SecureProjectFilesystem extends LocalFilesystem {
         await fs.rm(temporary, { force: true }).catch(() => undefined);
       }
       this.observedHashes.set(relative, digest(bytes));
+      this.rememberChange(relative, original, "write_file");
     });
   }
 
@@ -164,7 +234,13 @@ export class SecureProjectFilesystem extends LocalFilesystem {
 
   override async deleteFile(input: string, options?: RemoveOptions) {
     this.assertWrite(input);
-    return super.deleteFile(await this.rejectLinks(input), options);
+    const relative = await this.rejectLinks(input);
+    const original = this.trackedChanges.has(relative)
+      ? null
+      : await this.readCurrentFile(relative);
+    const result = await super.deleteFile(relative, options);
+    this.rememberChange(relative, original, "delete_file");
+    return result;
   }
 
   override async copyFile(source: string, destination: string, options?: CopyOptions) {

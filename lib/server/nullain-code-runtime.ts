@@ -14,6 +14,7 @@ import {
 } from "@/src/mastra/nullain-code/secure-filesystem";
 import {
   getProjectPath,
+  deleteConversation,
   markConversationReady,
   requireConversation,
   requireProject,
@@ -156,6 +157,7 @@ export async function sendNullainCodeMessage(input: {
     throw new Response("Mensagem inválida.", { status: 400 });
   const item = await getLiveConversation(input.ownerUserId, input.conversationId);
   if (item.activeRun) throw new Response("Já existe uma execução ativa.", { status: 409 });
+  item.filesystem.resetTrackedChanges();
   item.capability.level = "plan";
   if (item.session.mode.get() !== "plan") await item.session.mode.switch({ modeId: "plan" });
   const runId = randomUUID();
@@ -178,6 +180,25 @@ export async function sendNullainCodeMessage(input: {
     finishRun(item, "failed", error instanceof Error ? error.message.slice(0, 500) : "unknown");
   });
   return { runId };
+}
+
+export async function getNullainCodeWorkspaceSnapshot(ownerUserId: string, conversationId: string) {
+  const item = await getLiveConversation(ownerUserId, conversationId);
+  const entries = await item.filesystem.readdir(".", { recursive: true, maxDepth: 12 });
+  const safeEntries = entries.filter(
+    (entry) =>
+      entry.name !== ".mastracode" && !entry.name.startsWith(".mastracode/") && !entry.isSymlink,
+  );
+  const visibleEntries = safeEntries
+    .slice(0, 500)
+    .map(({ name, type, size }) => ({ path: name, type, size }));
+  return {
+    files: visibleEntries,
+    filesTruncated: safeEntries.length > visibleEntries.length,
+    changes: await item.filesystem.getTrackedChanges(),
+    mode: item.session.mode.get(),
+    running: Boolean(item.activeRun),
+  };
 }
 
 export async function decideNullainCodeSuspension(input: {
@@ -263,6 +284,25 @@ export async function cancelNullainCodeRun(ownerUserId: string, conversationId: 
   const item = await getLiveConversation(ownerUserId, conversationId);
   item.session.abort();
   finishRun(item, "cancelled", "user_cancelled");
+}
+
+export async function deleteNullainCodeConversation(ownerUserId: string, conversationId: string) {
+  const item = await getLiveConversation(ownerUserId, conversationId);
+  const conversation = requireConversation(ownerUserId, conversationId);
+  if (item.activeRun) {
+    item.session.abort();
+    finishRun(item, "cancelled", "conversation_deleted");
+  }
+  for (const listener of item.listeners) listener({ type: "conversation_deleted" });
+  item.listeners.clear();
+  await item.session.thread.delete({ threadId: conversation.mastraThreadId });
+  await nullainCodeController.deleteSession({
+    resourceId: `nullain-code:${ownerUserId}:${conversation.projectId}`,
+    scope: conversation.id,
+  });
+  unregisterNullainCodeWorkspace(conversation.id);
+  live.delete(conversation.id);
+  deleteConversation(ownerUserId, conversation.id);
 }
 
 export function subscribeNullainCode(conversationId: string, listener: Listener) {

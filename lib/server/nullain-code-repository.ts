@@ -167,3 +167,12 @@ export function listConversations(ownerUserId: string, projectId: string) {
     )
     .all(ownerUserId, projectId) as NullainConversation[];
 }
+
+export function deleteConversation(ownerUserId: string, conversationId: string) {
+  const conversation = requireConversation(ownerUserId, conversationId);
+  const result = getNullainDatabase()
+    .prepare("DELETE FROM nullain_code_conversation WHERE id = ? AND ownerUserId = ?")
+    .run(conversation.id, ownerUserId);
+  if (result.changes !== 1) throw new Response("Conversa não encontrada.", { status: 404 });
+  return conversation;
+}

@@ -127,7 +127,9 @@ export function CoworkersPanel() {
                   </span>
                 </div>
                 <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                  {agent.roleDescription || agent.title}
+                  {isBloub(agent)
+                    ? "Nullain Agent / Agente Principal"
+                    : agent.roleDescription || agent.title}
                 </p>
               </div>
             </div>
