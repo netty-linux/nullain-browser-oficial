@@ -53,6 +53,9 @@ Usuário → /api/chat → kernelAgent
 
 O `chatAgent` permanece registrado somente para compatibilidade com clientes legados.
 
+<img width="1919" height="916" alt="image" src="https://github.com/user-attachments/assets/a16a55d6-65f4-42eb-ae15-de2fb2bd9ae8" />
+
+
 ## Nullain Code
 
 O recurso em `/code` é um ambiente local de engenharia de software com identidade
