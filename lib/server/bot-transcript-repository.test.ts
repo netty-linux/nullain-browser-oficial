@@ -18,8 +18,11 @@ import {
   claimTranscriptRun,
   ensureTranscriptRun,
   finishTranscriptRun,
+  getActiveTranscriptRun,
   getTranscriptRun,
+  interruptOrphanRuns,
   listBotTranscript,
+  ORPHAN_RUN_TIMEOUT_MS,
   TranscriptRunCapability,
 } from "./bot-transcript-repository";
 import { getNullainDatabase, migrateNullainDatabase } from "./nullain-db";
@@ -219,5 +222,69 @@ describe("bot transcript", () => {
     expect(() =>
       cancelTranscriptRun("a", bot, conversation, new TranscriptRunCapability(), null),
     ).toThrow();
+  });
+  it("interrupts abandoned running runs after the timeout and reports honestly", () => {
+    const user = appendUserTranscript("a", bot, conversation, {
+      idempotencyKey: "orphan-running",
+      parts: [{ type: "text", text: "orphan" }],
+    });
+    const run = ensureTranscriptRun("a", bot, conversation, user.id);
+    const claim = claimTranscriptRun("a", bot, conversation, run.id);
+    expect(claim.claimed).toBe(true);
+    // Crash simulado: ninguém chama finish e o run vai envelhecendo.
+    getNullainDatabase()
+      .prepare("UPDATE nullain_bot_run SET updatedAt=? WHERE id=?")
+      .run(Date.now() - ORPHAN_RUN_TIMEOUT_MS - 1_000, run.id);
+    expect(getActiveTranscriptRun("a", bot, conversation)).toBeNull();
+    const runAfter = getTranscriptRun("a", bot, conversation, run.id);
+    expect(runAfter.status).toBe("interrupted");
+    expect(runAfter.publicError).toMatch(/timeout/i);
+    expect(
+      listBotTranscript("a", bot, conversation).find(
+        (message) => message.id === run.assistantMessageId,
+      ),
+    ).toMatchObject({ status: "cancelled", publicError: expect.stringMatching(/timeout/i) });
+    expect(claimTranscriptRun("a", bot, conversation, run.id).claimed).toBe(false);
+    expect(() =>
+      finishTranscriptRun("a", bot, conversation, claim.capability!, "completed", [
+        { type: "text", text: "late" },
+      ]),
+    ).toThrow();
+  });
+  it("keeps fresh runs claimable and reclaims nothing when nothing is stale", () => {
+    const user = appendUserTranscript("a", bot, conversation, {
+      idempotencyKey: "fresh-queued",
+      parts: [{ type: "text", text: "fresh" }],
+    });
+    const run = ensureTranscriptRun("a", bot, conversation, user.id);
+    expect(interruptOrphanRuns("a", bot, conversation)).toBe(0);
+    expect(getActiveTranscriptRun("a", bot, conversation)?.id).toBe(run.id);
+    const claim = claimTranscriptRun("a", bot, conversation, run.id);
+    expect(claim.claimed).toBe(true);
+    expect(getActiveTranscriptRun("a", bot, conversation)?.id).toBe(run.id);
+    const done = finishTranscriptRun("a", bot, conversation, claim.capability!, "completed", [
+      { type: "text", text: "ok" },
+    ]);
+    expect(done.status).toBe("completed");
+    expect(getActiveTranscriptRun("a", bot, conversation)).toBeNull();
+  });
+  it("interrupts stale queued runs before a fresh claim", () => {
+    const staleUser = appendUserTranscript("a", bot, conversation, {
+      idempotencyKey: "stale-queued",
+      parts: [{ type: "text", text: "stale" }],
+    });
+    const stale = ensureTranscriptRun("a", bot, conversation, staleUser.id);
+    getNullainDatabase()
+      .prepare("UPDATE nullain_bot_run SET status='queued',updatedAt=? WHERE id=?")
+      .run(Date.now() - ORPHAN_RUN_TIMEOUT_MS - 1_000, stale.id);
+    const freshUser = appendUserTranscript("a", bot, conversation, {
+      idempotencyKey: "fresh-after-stale",
+      parts: [{ type: "text", text: "fresh" }],
+    });
+    const fresh = ensureTranscriptRun("a", bot, conversation, freshUser.id);
+    const claim = claimTranscriptRun("a", bot, conversation, fresh.id);
+    expect(claim.claimed).toBe(true);
+    expect(getTranscriptRun("a", bot, conversation, stale.id).status).toBe("interrupted");
+    expect(getActiveTranscriptRun("a", bot, conversation)?.id).toBe(fresh.id);
   });
 });

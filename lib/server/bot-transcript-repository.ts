@@ -251,6 +251,7 @@ export function claimTranscriptRun(
     token = randomUUID(),
     now = Date.now();
   const { changed, row } = db.transaction(() => {
+    markOrphanRuns(db, conversationId, now);
     const changed = db
       .prepare(
         "UPDATE nullain_bot_run SET status='running',claimToken=?,claimedAt=?,updatedAt=? WHERE id=? AND botConversationId=? AND status='queued'",
@@ -330,6 +331,42 @@ export function cancelTranscriptRun(
   })();
 }
 
+export const ORPHAN_RUN_TIMEOUT_MS = 10 * 60 * 1_000;
+const ORPHAN_MESSAGE = "Execução interrompida por perda de capacidade (timeout).";
+type NullainDatabase = ReturnType<typeof getNullainDatabase>;
+
+/** Marca como `interrupted` os runs que levam colgando mais do umbral sem
+ * terminar — o servidor morreu entre claim e finish. Devolve quantos afetou. */
+function markOrphanRuns(db: NullainDatabase, conversationId: string, now: number): number {
+  const deadline = now - ORPHAN_RUN_TIMEOUT_MS;
+  const orphans = db
+    .prepare(
+      "SELECT id,assistantMessageId FROM nullain_bot_run WHERE botConversationId=? AND status IN ('queued','running') AND updatedAt<?",
+    )
+    .all(conversationId, deadline) as Array<{ id: string; assistantMessageId: string }>;
+  if (!orphans.length) return 0;
+  const placeholders = orphans.map(() => "?").join(",");
+  const messageIds = orphans.map((row) => row.assistantMessageId);
+  db.prepare(
+    `UPDATE nullain_bot_message SET status='cancelled',publicError=?,updatedAt=? WHERE id IN (${placeholders})`,
+  ).run(ORPHAN_MESSAGE, now, ...messageIds);
+  db.prepare(
+    "UPDATE nullain_bot_run SET status='interrupted',claimToken=NULL,publicError=?,updatedAt=? WHERE botConversationId=? AND status IN ('queued','running') AND updatedAt<?",
+  ).run(ORPHAN_MESSAGE, now, conversationId, deadline);
+  return orphans.length;
+}
+
+export function interruptOrphanRuns(
+  owner: string,
+  bot: string,
+  conversationId: string,
+  now = Date.now(),
+): number {
+  conversation(owner, bot, conversationId);
+  const db = getNullainDatabase();
+  return db.transaction(() => markOrphanRuns(db, conversationId, now))();
+}
+
 export function getTranscriptRun(
   owner: string,
   bot: string,
@@ -366,8 +403,10 @@ export function getActiveTranscriptRun(
   conversationId: string,
 ): TranscriptRun | null {
   conversation(owner, bot, conversationId);
+  const db = getNullainDatabase();
+  db.transaction(() => markOrphanRuns(db, conversationId, Date.now()))();
   return (
-    (getNullainDatabase()
+    (db
       .prepare(
         "SELECT id,botConversationId,userMessageId,assistantMessageId,status,createdAt,updatedAt,publicError FROM nullain_bot_run WHERE botConversationId=? AND status IN ('queued','running') ORDER BY createdAt DESC LIMIT 1",
       )
