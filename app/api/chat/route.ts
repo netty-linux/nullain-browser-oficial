@@ -21,6 +21,17 @@ import {
 } from "@/lib/server/chat-message-history";
 import { VISION_INPUT_CONTEXT_KEY } from "@/src/mastra/processors/strip-image-parts";
 import { getNullainSession } from "@/lib/server/nullain-auth";
+import { resolveBotRuntime } from "@/lib/server/bot-runtime-repository";
+import {
+  appendUserTranscript,
+  appendServerTranscript,
+  claimTranscriptRun,
+  ensureTranscriptRun,
+  finishTranscriptRun,
+  getTranscriptMessage,
+  type TranscriptRunCapability,
+} from "@/lib/server/bot-transcript-repository";
+import { advanceBotInterview } from "@/lib/server/bot-interview";
 
 // Modelos pesados (nemotron-3-ultra, glm-5.1...) podem passar de 30s no
 // primeiro token; com 30 a função morria no meio do stream e a resposta
@@ -228,6 +239,8 @@ export async function POST(req: Request) {
     generation?: boolean;
     generationMode?: "image" | "video";
     disabledSkills?: string[];
+    botId?: string;
+    botConversationId?: string;
   };
   const contentLength = Number(req.headers.get("content-length") ?? 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
@@ -288,11 +301,35 @@ export async function POST(req: Request) {
   const currentMessages = Array.isArray(messages) ? messages : [];
   const session = await getNullainSession(req.headers).catch(() => null);
   const ownerId = session?.user.id;
+  let botRuntime: ReturnType<typeof resolveBotRuntime> | null = null;
+  if (body.botId !== undefined) {
+    if (!ownerId)
+      return Response.json({ error: "Entre para usar um bot persistente." }, { status: 401 });
+    try {
+      botRuntime = resolveBotRuntime(ownerId, body.botId, body.botConversationId);
+    } catch (error) {
+      if (error instanceof Response) return error;
+      return Response.json(
+        { error: error instanceof Error ? error.message : "Bot inválido." },
+        { status: 400 },
+      );
+    }
+  }
+  const grantedSkills = botRuntime?.grantedSkillNames ?? null;
+  const grantedSkillSet = grantedSkills
+    ? new Set(grantedSkills.map((name) => name.toLowerCase()))
+    : null;
   const disabled = Array.isArray(disabledSkills)
     ? disabledSkills.filter((skill): skill is string => typeof skill === "string")
     : [];
   const explicitSkillId = selectedSkillId(currentMessages);
   const selectedSkill = explicitSkillId ? getSkill(explicitSkillId, [], ownerId) : undefined;
+  if (selectedSkill && grantedSkillSet && !grantedSkillSet.has(selectedSkill.name.toLowerCase())) {
+    return Response.json(
+      { error: "Esta skill não está disponível para o bot atual." },
+      { status: 403 },
+    );
+  }
   if (explicitSkillId && !selectedSkill) {
     return Response.json(
       {
@@ -312,7 +349,8 @@ export async function POST(req: Request) {
     );
   }
   const hasCurrentImage = hasLatestUserImage(currentMessages);
-  let selectedModel = normalized ?? process.env.MASTRA_MODEL ?? "ollama-cloud/gpt-oss:20b";
+  let selectedModel =
+    botRuntime?.bot.modelId ?? normalized ?? process.env.MASTRA_MODEL ?? "ollama-cloud/gpt-oss:20b";
   if (hasCurrentImage && !isVisionChatModel(selectedModel)) {
     selectedModel = DEFAULT_VISION_CHAT_MODEL;
   }
@@ -328,6 +366,19 @@ export async function POST(req: Request) {
     keepLatestUserImages: hasCurrentImage && isVisionChatModel(selectedModel),
   });
   const prunedMessages = pruneResult.messages;
+  // O transcript SQLite hidrata a interface, enquanto a memória Mastra fornece
+  // o contexto operacional. Para bots, enviar novamente todo o histórico
+  // hidratado duplicaria cada turno; somente o último user turn entra no run.
+  const agentInputMessages = botRuntime
+    ? prunedMessages
+        .filter(
+          (message) =>
+            Boolean(message) &&
+            typeof message === "object" &&
+            (message as { role?: unknown }).role === "user",
+        )
+        .slice(-1)
+    : prunedMessages;
   logPruneStats(
     currentMessages,
     prunedMessages,
@@ -342,6 +393,120 @@ export async function POST(req: Request) {
   // a imagem; o backend a repassa direto à API WaveSpeed).
   const attachedImageDataUrl = generation ? getLatestUserImageDataUrl(currentMessages) : null;
 
+  let persistentRun: {
+    id: string;
+    capability: TranscriptRunCapability;
+    assistantMessageId: string;
+  } | null = null;
+  if (botRuntime) {
+    const latest = [...currentMessages]
+      .reverse()
+      .find(
+        (item) => item && typeof item === "object" && (item as { role?: unknown }).role === "user",
+      ) as { id?: unknown; parts?: unknown[] } | undefined;
+    const idempotencyKey =
+      typeof latest?.id === "string" && latest.id.length <= 128
+        ? latest.id
+        : req.headers.get("x-nullain-turn-id");
+    if (!idempotencyKey)
+      return Response.json(
+        { error: "Identificador idempotente do envio ausente." },
+        { status: 400 },
+      );
+    const visibleParts = (latest?.parts ?? [])
+      .filter((part): part is { type: "text"; text: string } =>
+        Boolean(
+          part &&
+          typeof part === "object" &&
+          (part as { type?: unknown }).type === "text" &&
+          typeof (part as { text?: unknown }).text === "string",
+        ),
+      )
+      .map((part) => ({ type: "text" as const, text: part.text }));
+    const userMessage = appendUserTranscript(
+      ownerId!,
+      botRuntime.bot.id,
+      botRuntime.conversation.id,
+      { idempotencyKey, parts: visibleParts },
+    );
+    const interview = botRuntime.bot.isSystem
+      ? advanceBotInterview(
+          ownerId!,
+          botRuntime.conversation.id,
+          visibleParts.map((part) => part.text).join("\n"),
+        )
+      : null;
+    if (interview) {
+      const structuredParts = [
+        { type: "text" as const, text: interview.text },
+        ...(interview.kind === "review" ? [interview.part] : []),
+      ];
+      const persisted = appendServerTranscript(
+        ownerId!,
+        botRuntime.bot.id,
+        botRuntime.conversation.id,
+        `bot-interview:${interview.draft.id}:${interview.draft.revision}:${interview.kind}`,
+        structuredParts,
+      );
+      const interviewStream = createUIMessageStream<UIMessage>({
+        execute: async ({ writer }) => {
+          writer.write({ type: "text-start", id: persisted.id } as never);
+          writer.write({ type: "text-delta", id: persisted.id, delta: interview.text } as never);
+          writer.write({ type: "text-end", id: persisted.id } as never);
+          if (interview.kind === "review")
+            writer.write({
+              type: "data-bot-review",
+              id: `${persisted.id}:review`,
+              data: interview.part,
+            } as never);
+        },
+      });
+      return createUIMessageStreamResponse({ stream: interviewStream });
+    }
+    const run = ensureTranscriptRun(
+      ownerId!,
+      botRuntime.bot.id,
+      botRuntime.conversation.id,
+      userMessage.id,
+    );
+    const claim = claimTranscriptRun(
+      ownerId!,
+      botRuntime.bot.id,
+      botRuntime.conversation.id,
+      run.id,
+    );
+    if (!claim.claimed || !claim.capability) {
+      if (claim.run.status === "completed") {
+        const stored = getTranscriptMessage(
+          ownerId!,
+          botRuntime.bot.id,
+          botRuntime.conversation.id,
+          claim.run.assistantMessageId,
+        );
+        const storedText = stored.parts
+          .filter((part): part is { type: "text"; text: string } => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+        const replay = createUIMessageStream<UIMessage>({
+          execute: async ({ writer }) => {
+            writer.write({ type: "text-start", id: stored.id } as never);
+            writer.write({ type: "text-delta", id: stored.id, delta: storedText } as never);
+            writer.write({ type: "text-end", id: stored.id } as never);
+          },
+        });
+        return createUIMessageStreamResponse({ stream: replay });
+      }
+      return Response.json(
+        { error: `Execução já está ${claim.run.status}.`, run: claim.run },
+        { status: claim.run.status === "running" ? 409 : 422 },
+      );
+    }
+    persistentRun = {
+      id: run.id,
+      capability: claim.capability,
+      assistantMessageId: run.assistantMessageId,
+    };
+  }
   const agent = mastra.getAgent("kernelAgent");
   const isReasoningModel = REASONING_MODELS.has(selectedModel);
   // Se o usuário escolheu um effort no seletor, respeita; senão usa o default
@@ -374,8 +539,12 @@ export async function POST(req: Request) {
   // thread: por conversa de cliente (estável), para a memória persistir
   // entre requests na mesma thread (DoD #4).
   streamOptions.memory = {
-    thread: `nt-${requestThreadId}`,
-    resource: "default-resource",
+    thread: botRuntime
+      ? `bot-${botRuntime.bot.id}-${botRuntime.conversation.mastraThreadId}`
+      : `nt-${requestThreadId}`,
+    resource: botRuntime
+      ? `user-${ownerId}:bot-${botRuntime.bot.id}:conversation-${botRuntime.conversation.id}`
+      : "default-resource",
   };
 
   // Skills: tool load_skill + índice no prompt SEMPRE ativos (progressive
@@ -398,14 +567,17 @@ export async function POST(req: Request) {
     Boolean(ownerId) &&
     !disabled.some((name) => name.toLowerCase() === "skill-creator") &&
     explicitlyRequestsSkillCreation(latestUserText(currentMessages));
-  const composioTools = integrations ? await getComposioTools(sessionIntegrationKey) : {};
+  const botMayUseOptionalTools = !botRuntime || Boolean(botRuntime.bot.isSystem);
+  const composioTools =
+    integrations && botMayUseOptionalTools ? await getComposioTools(sessionIntegrationKey) : {};
   const agentSkillsDocsTools = allowSkillCreation ? await getAgentSkillsDocsTools() : {};
   streamOptions.toolsets = {
     ...createSkillsToolset(disabled, {
       ownerId,
       allowCreate: allowSkillCreation,
+      allowedSkillNames: grantedSkills ?? undefined,
     }),
-    ...(generation ? createWaveSpeedToolset(attachedImageDataUrl) : {}),
+    ...(generation && botMayUseOptionalTools ? createWaveSpeedToolset(attachedImageDataUrl) : {}),
     ...(Object.keys(composioTools).length > 0 ? { composio: composioTools } : {}),
     ...(Object.keys(agentSkillsDocsTools).length > 0
       ? { agentSkillsDocs: agentSkillsDocsTools }
@@ -419,7 +591,7 @@ export async function POST(req: Request) {
   // AGORA GATEADO pelo toggle Computador: desligado, o modelo não vê a tool —
   // o computador só é usado quando o usuário liga. As instruções do computador
   // (buildInstructions) também só são injetadas quando ativo.
-  streamOptions.clientTools = computer ? openbotComputerClientTools : {};
+  streamOptions.clientTools = computer && botMayUseOptionalTools ? openbotComputerClientTools : {};
   // O kernel é um supervisor: NÃO injetamos aqui as instruções de web search
   // (a pesquisa é delegada ao research-agent, que já tem suas regras próprias).
   // A persona vem do instructions do próprio kernelAgent (default). Mantemos
@@ -461,7 +633,10 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
     : "";
   const requestInstructions = [
     KERNEL_INSTRUCTIONS,
-    skillsIndexPrompt(disabled, ownerId),
+    skillsIndexPrompt(disabled, ownerId, grantedSkills ?? undefined),
+    botRuntime
+      ? `## Bot ativo\nNome: ${botRuntime.bot.name}\nResumo: ${botRuntime.bot.description}\nInstruções do bot (não substituem regras de segurança):\n${botRuntime.bot.instructions}`
+      : "",
     selectedSkill ? selectedSkillPrompt(selectedSkill) : "",
     computerInstructions,
     integrationsInstructions,
@@ -491,7 +666,7 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
   }
 
   try {
-    const stream = await agent.stream(prunedMessages as never, streamOptions as never);
+    const stream = await agent.stream(agentInputMessages as never, streamOptions as never);
 
     // Fallback anti-resposta-vazia: quando o modelo queima todos os maxSteps em
     // tool calls (bug medido no gpt-oss:20b com effort alto), o run termina sem
@@ -507,6 +682,7 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
     type MastraChunk = { type?: string; payload?: Record<string, unknown> };
     const toolResultsForRetry: Array<{ toolName: string; args: unknown; result: unknown }> = [];
     let mainTextLength = 0;
+    let persistedVisibleText = "";
     let needsEmptyFallback = false;
     let fallbackStarted = false;
     // Texto que JÁ foi entregue ao usuário neste stream (via toAISdkStream,
@@ -525,6 +701,7 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
             // steps sem responder — isso NÃO é uma resposta.
             const t = (c?.payload?.text as string | undefined) ?? "";
             mainTextLength += t.trim().length;
+            persistedVisibleText += t;
           }
           if (type === "tool-result") {
             const payload = c?.payload as MastraToolResultChunk["payload"] | undefined;
@@ -546,124 +723,152 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
 
     const uiMessageStream = createUIMessageStream<UIMessage>({
       execute: async ({ writer }) => {
-        const passthrough = toAISdkStream(monitored as never, {
-          from: "agent",
-          version: "v7",
-          sendReasoning: true,
-          sendStart: true,
-          sendFinish: true,
-          experimentalTransform: thinkingExtractor(),
-          onError: (error: unknown) => errorToText(error),
-        });
-        const reader = passthrough.getReader();
         try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            // Conta o texto que de fato chega ao usuário (UI stream). É ESTE
-            // comprimento que autoriza o fallback — não o do fluxo mastra,
-            // que inclui texto consumido por transforms internos.
-            const v = value as { type?: string; delta?: string } | undefined;
-            if (v?.type === "text-delta" && typeof v.delta === "string") {
-              deliveredTextLength += v.delta.trim().length;
-            }
-            writer.write(value as never);
-          }
-        } finally {
-          reader.releaseLock();
-        }
-
-        // Run terminou sem texto mas com tool results? Refaz sem tools.
-        // GUARD DUPLo: só dispara se (a) o fluxo mastra não produziu texto E
-        // (b) NADA foi entregue ao usuário. Um retry sobre conteúdo visível
-        // duplica frases na tela — o bug das respostas repetidas.
-        if (needsEmptyFallback && !fallbackStarted && deliveredTextLength === 0) {
-          fallbackStarted = true;
-          console.warn(
-            `[/api/chat] empty-answer fallback: run ended without text after ${toolResultsForRetry.length} tool calls — retrying without tools`,
-          );
-          const digest = toolResultsForRetry
-            .map((r, i) => {
-              let resultText = "";
-              try {
-                resultText = JSON.stringify(r.result, null, 0) ?? "";
-              } catch {
-                resultText = String(r.result);
-              }
-              return `[${i + 1}] ${r.toolName}(${JSON.stringify(r.args ?? {})}) => ${resultText.slice(0, 4000)}`;
-            })
-            .join("\n\n");
-
-          writer.write({
-            type: "text-start",
-            id: "nullain-fallback",
-          } as never);
-          writer.write({
-            type: "text-delta",
-            id: "nullain-fallback",
-            delta: "",
-          } as never);
-
+          const passthrough = toAISdkStream(monitored as never, {
+            from: "agent",
+            version: "v7",
+            sendReasoning: true,
+            sendStart: true,
+            sendFinish: true,
+            experimentalTransform: thinkingExtractor(),
+            onError: (error: unknown) => errorToText(error),
+          });
+          const reader = passthrough.getReader();
           try {
-            const retryOptions: Record<string, unknown> = {
-              model: selectedModel as never,
-              // Sem tools: o modelo agora SÓ escreve a resposta.
-              activeTools: [] as never,
-              instructions: `${requestInstructions}
-
-FALLBACK MODE: The tool step budget was exhausted. You already collected the content below. Answer the user's original question NOW using only this information — no more tool calls. Cite sources as markdown links like [domain.com](url). If the results are insufficient, say what you found and what's missing.`,
-            };
-            if (isReasoningModel || reasoningEffort) {
-              // Retry com effort mínimo: o goal é despejar a resposta, não pensar mais.
-              retryOptions.providerOptions = ollamaProviderOptions("low");
-              retryOptions.modelSettings = { reasoningEffort: "low", think: true };
-            }
-
-            const retryStream = await agent.stream(
-              [
-                ...prunedMessages,
-                {
-                  role: "user" as const,
-                  parts: [
-                    {
-                      type: "text" as const,
-                      text: `You already ran searches and collected these results:\n\n${digest}\n\nNow write the final answer to the original question using these results. Do NOT call any tools.`,
-                    },
-                  ],
-                },
-              ] as never,
-              retryOptions as never,
-            );
-
-            const retryUi = toAISdkStream(retryStream, {
-              from: "agent",
-              version: "v7",
-              sendReasoning: false,
-              sendStart: false,
-              sendFinish: false,
-              onError: (error: unknown) => errorToText(error),
-            });
-            const retryReader = retryUi.getReader();
             while (true) {
-              const { done, value } = await retryReader.read();
+              const { done, value } = await reader.read();
               if (done) break;
-              // Só repassamos texto do retry (sem start/finish próprios)
-              if ((value as { type?: string })?.type === "text-delta") {
-                writer.write(value as never);
+              // Conta o texto que de fato chega ao usuário (UI stream). É ESTE
+              // comprimento que autoriza o fallback — não o do fluxo mastra,
+              // que inclui texto consumido por transforms internos.
+              const v = value as { type?: string; delta?: string } | undefined;
+              if (v?.type === "text-delta" && typeof v.delta === "string") {
+                deliveredTextLength += v.delta.trim().length;
               }
+              writer.write(value as never);
             }
-            retryReader.releaseLock();
-          } catch (retryError) {
-            console.error("[/api/chat] empty-answer fallback failed:", retryError);
+          } finally {
+            reader.releaseLock();
+          }
+
+          // Run terminou sem texto mas com tool results? Refaz sem tools.
+          // GUARD DUPLo: só dispara se (a) o fluxo mastra não produziu texto E
+          // (b) NADA foi entregue ao usuário. Um retry sobre conteúdo visível
+          // duplica frases na tela — o bug das respostas repetidas.
+          if (needsEmptyFallback && !fallbackStarted && deliveredTextLength === 0) {
+            fallbackStarted = true;
+            console.warn(
+              `[/api/chat] empty-answer fallback: run ended without text after ${toolResultsForRetry.length} tool calls — retrying without tools`,
+            );
+            const digest = toolResultsForRetry
+              .map((r, i) => {
+                let resultText = "";
+                try {
+                  resultText = JSON.stringify(r.result, null, 0) ?? "";
+                } catch {
+                  resultText = String(r.result);
+                }
+                return `[${i + 1}] ${r.toolName}(${JSON.stringify(r.args ?? {})}) => ${resultText.slice(0, 4000)}`;
+              })
+              .join("\n\n");
+
+            writer.write({
+              type: "text-start",
+              id: "nullain-fallback",
+            } as never);
             writer.write({
               type: "text-delta",
               id: "nullain-fallback",
-              delta:
-                "\n\n_(A busca foi concluída mas o modelo não gerou a resposta final. Os resultados das buscas estão no histórico — tente reformular.)_",
+              delta: "",
             } as never);
-          } finally {
-            writer.write({ type: "text-end", id: "nullain-fallback" } as never);
+
+            try {
+              const retryOptions: Record<string, unknown> = {
+                model: selectedModel as never,
+                // Sem tools: o modelo agora SÓ escreve a resposta.
+                activeTools: [] as never,
+                instructions: `${requestInstructions}
+
+FALLBACK MODE: The tool step budget was exhausted. You already collected the content below. Answer the user's original question NOW using only this information — no more tool calls. Cite sources as markdown links like [domain.com](url). If the results are insufficient, say what you found and what's missing.`,
+              };
+              if (isReasoningModel || reasoningEffort) {
+                // Retry com effort mínimo: o goal é despejar a resposta, não pensar mais.
+                retryOptions.providerOptions = ollamaProviderOptions("low");
+                retryOptions.modelSettings = { reasoningEffort: "low", think: true };
+              }
+
+              const retryStream = await agent.stream(
+                [
+                  ...agentInputMessages,
+                  {
+                    role: "user" as const,
+                    parts: [
+                      {
+                        type: "text" as const,
+                        text: `You already ran searches and collected these results:\n\n${digest}\n\nNow write the final answer to the original question using these results. Do NOT call any tools.`,
+                      },
+                    ],
+                  },
+                ] as never,
+                retryOptions as never,
+              );
+
+              const retryUi = toAISdkStream(retryStream, {
+                from: "agent",
+                version: "v7",
+                sendReasoning: false,
+                sendStart: false,
+                sendFinish: false,
+                onError: (error: unknown) => errorToText(error),
+              });
+              const retryReader = retryUi.getReader();
+              while (true) {
+                const { done, value } = await retryReader.read();
+                if (done) break;
+                // Só repassamos texto do retry (sem start/finish próprios)
+                if ((value as { type?: string })?.type === "text-delta") {
+                  const delta = (value as { delta?: unknown }).delta;
+                  if (typeof delta === "string") persistedVisibleText += delta;
+                  writer.write(value as never);
+                }
+              }
+              retryReader.releaseLock();
+            } catch (retryError) {
+              console.error("[/api/chat] empty-answer fallback failed:", retryError);
+              writer.write({
+                type: "text-delta",
+                id: "nullain-fallback",
+                delta:
+                  "\n\n_(A busca foi concluída mas o modelo não gerou a resposta final. Os resultados das buscas estão no histórico — tente reformular.)_",
+              } as never);
+            } finally {
+              writer.write({ type: "text-end", id: "nullain-fallback" } as never);
+            }
           }
+          if (persistentRun && botRuntime) {
+            finishTranscriptRun(
+              ownerId!,
+              botRuntime.bot.id,
+              botRuntime.conversation.id,
+              persistentRun.capability,
+              "completed",
+              [{ type: "text", text: persistedVisibleText }],
+            );
+            persistentRun = null;
+          }
+        } catch (streamError) {
+          if (persistentRun && botRuntime) {
+            finishTranscriptRun(
+              ownerId!,
+              botRuntime.bot.id,
+              botRuntime.conversation.id,
+              persistentRun.capability,
+              "failed",
+              [{ type: "text", text: persistedVisibleText }],
+            );
+            persistentRun = null;
+          }
+          throw streamError;
         }
       },
       onError: (error) => errorToText(error),
@@ -671,6 +876,20 @@ FALLBACK MODE: The tool step budget was exhausted. You already collected the con
 
     return createUIMessageStreamResponse({ stream: uiMessageStream });
   } catch (error) {
+    if (persistentRun && botRuntime) {
+      try {
+        finishTranscriptRun(
+          ownerId!,
+          botRuntime.bot.id,
+          botRuntime.conversation.id,
+          persistentRun.capability,
+          "failed",
+          [{ type: "text", text: "" }],
+        );
+      } catch {
+        /* preserve original error */
+      }
+    }
     // Em vez de um 500 que a UI engole em silêncio, devolve um stream de UI
     // com a parte de erro — o MessageError do thread.tsx renderiza.
     const message = errorToText(error);

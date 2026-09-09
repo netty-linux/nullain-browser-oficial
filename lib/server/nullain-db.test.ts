@@ -24,7 +24,13 @@ describe("Nullain app database migrations", () => {
     migrateNullainDatabase(database);
     migrateNullainDatabase(database);
     const migrations = database.prepare("SELECT name FROM nullain_migration ORDER BY name").all();
-    expect(migrations).toEqual([{ name: "001_better_auth.sql" }, { name: "002_nullain_code.sql" }]);
+    expect(migrations).toEqual([
+      { name: "001_better_auth.sql" },
+      { name: "002_nullain_code.sql" },
+      { name: "003_bot_runtime.sql" },
+      { name: "004_bot_transcript.sql" },
+      { name: "005_bot_openbot_link.sql" },
+    ]);
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
     database.close();
   });

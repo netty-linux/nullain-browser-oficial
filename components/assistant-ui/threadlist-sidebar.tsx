@@ -20,6 +20,7 @@ import { NullainLogo } from "@/components/nullain-logo";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
 import { ThreadSearchPanel } from "@/components/assistant-ui/thread-search-panel";
 import { CoworkersPanel } from "@/components/assistant-ui/coworkers-panel";
+import { BotLauncher } from "@/components/bots/bot-launcher";
 
 type SidebarTab = "chats" | "search" | "coworkers";
 const SIDEBAR_COLLAPSED_KEY = "nullain-sidebar-collapsed";
@@ -170,7 +171,10 @@ export function ThreadListSidebar() {
             {pathname === "/plugins" ||
             pathname === "/skills" ||
             pathname.startsWith("/code") ? null : tab === "chats" ? (
-              <ThreadList />
+              <>
+                <BotLauncher />
+                <ThreadList />
+              </>
             ) : tab === "search" ? (
               <ThreadSearchPanel onOpenThread={() => setTab("chats")} />
             ) : (

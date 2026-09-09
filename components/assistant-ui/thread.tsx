@@ -37,7 +37,8 @@ import { ComposerSkillSelector, useSkillSelection } from "@/components/assistant
 import { GenerationMedia } from "@/components/assistant-ui/generation-media";
 import { RunningActivity } from "@/components/assistant-ui/running-activity";
 import { PluginConnectionPrompt } from "@/components/assistant-ui/plugin-connection-prompt";
-import { NullainLogo } from "@/components/nullain-logo";
+import { ActiveBotAvatar, useActiveBotIdentity } from "@/components/bots/bot-avatar";
+import { cancelBotTranscriptRun, type BotRunTarget } from "@/lib/bot-transcript-history";
 import {
   GptOssLogo,
   DeepSeekLogo,
@@ -342,6 +343,10 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             </AuiIf>
 
             <div data-slot="aui_message-group" className="mb-16 flex flex-col gap-y-8 empty:hidden">
+              <div className="flex flex-col items-center gap-1.5">
+                <TranscriptHistoryButton />
+                <BotRunCancelButton />
+              </div>
               <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
             </div>
 
@@ -363,6 +368,77 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         </ThreadPrimitive.Viewport>
       </ThreadPrimitive.Root>
     </ComposerComputerContext.Provider>
+  );
+};
+
+const TranscriptHistoryButton: FC = () => {
+  const [visible, setVisible] = useState(false);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const sync = () => {
+      try {
+        setVisible(Boolean(localStorage.getItem("nullain-active-bot-id")));
+      } catch {
+        setVisible(false);
+      }
+    };
+    sync();
+    window.addEventListener("nullain-bot-changed", sync);
+    return () => window.removeEventListener("nullain-bot-changed", sync);
+  }, []);
+  if (!visible) return null;
+  return (
+    <div className="flex justify-center">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        disabled={loading}
+        onClick={() => {
+          setLoading(true);
+          window.dispatchEvent(new Event("nullain-transcript-load-older"));
+          window.setTimeout(() => setLoading(false), 1000);
+        }}
+        className="h-8 rounded-full px-3.5 text-xs text-muted-foreground"
+      >
+        {loading ? "Carregando…" : "Carregar mensagens antigas"}
+      </Button>
+    </div>
+  );
+};
+
+const BotRunCancelButton: FC = () => {
+  const [active, setActive] = useState<(BotRunTarget & { runId: string }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const onChange = (event: Event) => {
+      setActive((event as CustomEvent<(BotRunTarget & { runId: string }) | null>).detail ?? null);
+    };
+    window.addEventListener("nullain-transcript-active-run", onChange);
+    return () => window.removeEventListener("nullain-transcript-active-run", onChange);
+  }, []);
+  if (!active) return null;
+  return (
+    <div className="flex justify-center">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          void cancelBotTranscriptRun(active, active.runId)
+            .then(() => {
+              window.dispatchEvent(new Event("nullain-transcript-refresh"));
+            })
+            .catch(() => {})
+            .finally(() => setBusy(false));
+        }}
+        className="h-8 rounded-full px-3.5 text-xs"
+      >
+        {busy ? "Cancelando…" : "Cancelar execução"}
+      </Button>
+    </div>
   );
 };
 
@@ -394,12 +470,13 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  const activeBot = useActiveBotIdentity();
   return (
     <div className="aui-thread-welcome-root mb-10 flex flex-col items-center px-4">
       <div className="mb-5 flex items-center gap-2.5 self-center text-foreground/62">
-        <NullainLogo className="size-7" decorative />
+        <ActiveBotAvatar className="size-7" />
         <h2 className="aui-thread-welcome-brand text-[13px] font-semibold uppercase tracking-[0.12em]">
-          Nullain Agent
+          {activeBot?.name ?? "Nullain Agent"}
         </h2>
       </div>
       <h1 className="aui-thread-welcome-message-inner mx-auto w-full max-w-[38rem] text-center text-[clamp(2.15rem,3.35vw,3rem)] font-medium leading-[1.08] tracking-[-0.04em] text-balance">
@@ -743,13 +820,7 @@ const MessageError: FC = () => {
 };
 
 const NullainAvatar: FC<{ size?: string }> = ({ size = "size-8" }) => {
-  return (
-    <div
-      className={`shrink-0 rounded-full overflow-hidden bg-transparent ${size} flex items-center justify-center`}
-    >
-      <NullainLogo className="size-full" />
-    </div>
-  );
+  return <ActiveBotAvatar className={size} />;
 };
 
 const AssistantMessage: FC = () => {

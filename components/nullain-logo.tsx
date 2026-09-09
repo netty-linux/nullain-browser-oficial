@@ -4,17 +4,23 @@ import styles from "./nullain-logo.module.css";
 
 type NullainLogoProps = Omit<ComponentPropsWithoutRef<"span">, "children"> & {
   decorative?: boolean;
+  static?: boolean;
 };
 
 /**
  * Marca animada da Nullain, com contraste correto em ambos os temas.
  * Respeita a preferência do sistema por movimento reduzido.
  */
-export function NullainLogo({ className, decorative = false, ...props }: NullainLogoProps) {
+export function NullainLogo({
+  className,
+  decorative = false,
+  static: staticLogo = false,
+  ...props
+}: NullainLogoProps) {
   return (
     <span
       {...props}
-      className={cn(styles.root, className)}
+      className={cn(styles.root, staticLogo && styles.staticOnly, className)}
       role={decorative ? undefined : "img"}
       aria-label={decorative ? undefined : "Nullain"}
       aria-hidden={decorative || undefined}

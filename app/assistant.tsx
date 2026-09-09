@@ -87,6 +87,15 @@ import { ThreadListSidebar } from "@/components/assistant-ui/threadlist-sidebar"
 import { ComputerSidebar } from "@/components/assistant-ui/computer-sidebar";
 import { SkillSelectionProvider } from "@/components/assistant-ui/skill-selector";
 import { SkillCreatorToolUI } from "@/components/assistant-ui/skill-creator-tool-ui";
+import {
+  loadBotTranscript,
+  readBotTranscript,
+  useBotThreadHistoryAdapter,
+  useBotTranscriptTarget,
+} from "@/lib/bot-transcript-history";
+import { useEffect, useRef } from "react";
+import { BotCreatedDataUI, BotReviewDataUI } from "@/components/bots/bot-transcript-cards";
+import { ActiveBotProvider } from "@/components/bots/bot-avatar";
 
 function toNullainMessage(message: AppendMessage) {
   const parts = [
@@ -150,11 +159,14 @@ function toNullainMessage(message: AppendMessage) {
 
 export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNode }>) => {
   const pathname = usePathname();
+  const transcriptTarget = useBotTranscriptTarget();
+  const historyAdapter = useBotThreadHistoryAdapter(transcriptTarget);
   const runtime = useChatRuntime({
     toCreateMessage: toNullainMessage,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     adapters: {
       attachments: compressedImageAttachmentAdapter,
+      history: historyAdapter,
     },
     transport: new AssistantChatTransport({
       api: "/api/chat",
@@ -191,6 +203,17 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
           threadId = crypto.randomUUID();
           localStorage.setItem("nullain-thread-id", threadId);
         }
+        // O seletor de bots grava somente identificadores opacos. A rota
+        // continua sendo a autoridade: ela exige sessão, verifica posse e
+        // cria/resolve a conversa isolada antes de tocar na memória Mastra.
+        const botId = localStorage.getItem("nullain-active-bot-id") || undefined;
+        let botConversationId = botId
+          ? localStorage.getItem("nullain-active-bot-conversation-id")
+          : null;
+        if (botId && !botConversationId) {
+          botConversationId = crypto.randomUUID();
+          localStorage.setItem("nullain-active-bot-conversation-id", botConversationId);
+        }
         return {
           body: {
             messages,
@@ -200,6 +223,8 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
             generation: loadGeneration(),
             generationMode: loadGenerationMode(),
             disabledSkills: loadDisabledSkills(),
+            botId,
+            botConversationId: botConversationId ?? undefined,
             config: {
               modelName: model,
               reasoningEffort: loadEffort(),
@@ -215,27 +240,123 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
       },
     }),
   });
+  const loadedTarget = useRef<string | null>(null);
+  useEffect(() => {
+    if (!transcriptTarget) return;
+    const key = `${transcriptTarget.botId}:${transcriptTarget.conversationId}`;
+    if (loadedTarget.current === key) return;
+    loadedTarget.current = key;
+    let current = true;
+    runtime.thread.cancelRun();
+    void loadBotTranscript(transcriptTarget)
+      .then((messages) => {
+        if (current) runtime.thread.importExternalState({ messages });
+      })
+      .catch(console.error);
+    return () => {
+      current = false;
+    };
+  }, [runtime, transcriptTarget]);
+  useEffect(() => {
+    if (!transcriptTarget) return;
+    let current = true;
+    let sawActiveRun = false;
+    let attempts = 0;
+    let before: number | undefined;
+    const rememberCursor = (snapshot: { messages: unknown[]; nextCursor?: number | null }) => {
+      const first = snapshot.messages[0] as { metadata?: unknown } | undefined;
+      const cursor =
+        snapshot.nextCursor ??
+        (first?.metadata as { nullainSequence?: unknown } | undefined)?.nullainSequence;
+      before = typeof cursor === "number" ? cursor : undefined;
+    };
+    const loadOlder = async () => {
+      if (before === undefined || !current) return;
+      try {
+        const page = await readBotTranscript(transcriptTarget, before);
+        if (!current) return;
+        rememberCursor(page);
+        runtime.thread.importExternalState({ messages: page.messages, append: true });
+      } catch (error) {
+        console.error(error);
+      }
+    };
+    const onLoadOlder = () => void loadOlder();
+    const dispatchActiveRun = (run: { id: string; status: "queued" | "running" } | null) => {
+      window.dispatchEvent(
+        new CustomEvent("nullain-transcript-active-run", {
+          detail: run
+            ? {
+                botId: transcriptTarget.botId,
+                conversationId: transcriptTarget.conversationId,
+                runId: run.id,
+              }
+            : null,
+        }),
+      );
+    };
+    const synchronize = async () => {
+      if (!current || document.visibilityState === "hidden" || attempts >= 120) return;
+      attempts += 1;
+      const snapshot = await readBotTranscript(transcriptTarget);
+      if (!current) return;
+      rememberCursor(snapshot);
+      dispatchActiveRun(snapshot.activeRun);
+      if (snapshot.activeRun) {
+        sawActiveRun = true;
+        return;
+      }
+      if (sawActiveRun) {
+        runtime.thread.importExternalState({ messages: snapshot.messages });
+        sawActiveRun = false;
+      }
+    };
+    const refresh = () =>
+      readBotTranscript(transcriptTarget)
+        .then((snapshot) => {
+          if (current) {
+            rememberCursor(snapshot);
+            dispatchActiveRun(snapshot.activeRun);
+            runtime.thread.importExternalState({ messages: snapshot.messages });
+          }
+        })
+        .catch(console.error);
+    void synchronize().catch(console.error);
+    const interval = window.setInterval(() => void synchronize().catch(console.error), 3_000);
+    window.addEventListener("nullain-transcript-refresh", refresh);
+    window.addEventListener("nullain-transcript-load-older", onLoadOlder);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+      window.removeEventListener("nullain-transcript-refresh", refresh);
+      window.removeEventListener("nullain-transcript-load-older", onLoadOlder);
+    };
+  }, [runtime, transcriptTarget]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      {/* Registra a tool UI do computador (inline na thread) — Inversão FASE 5. */}
-      <ComputerToolUI />
-      <SkillCreatorToolUI />
-      <SkillSelectionProvider>
-        <div className="nullain-stage relative h-svh w-full overflow-hidden p-0 md:p-4 xl:p-7">
-          {/* Um único frame reúne navegação, trabalho e computador. Em telas
+      <ActiveBotProvider>
+        {/* Registra a tool UI do computador (inline na thread) — Inversão FASE 5. */}
+        <ComputerToolUI />
+        <SkillCreatorToolUI />
+        <BotReviewDataUI />
+        <BotCreatedDataUI />
+        <SkillSelectionProvider>
+          <div className="nullain-stage relative h-svh w-full overflow-hidden p-0 md:p-4 xl:p-7">
+            {/* Um único frame reúne navegação, trabalho e computador. Em telas
             pequenas ele volta a ocupar o viewport inteiro. */}
-          <div className="nullain-app-frame flex h-full w-full overflow-hidden border-foreground/8 bg-background md:rounded-[1.5rem] md:border">
-            <ThreadListSidebar />
-            <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-              {children}
-            </main>
-            {pathname !== "/plugins" && pathname !== "/skills" && !pathname.startsWith("/code") && (
-              <ComputerSidebar />
-            )}
+            <div className="nullain-app-frame flex h-full w-full overflow-hidden border-foreground/8 bg-background md:rounded-[1.5rem] md:border">
+              <ThreadListSidebar />
+              <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                {children}
+              </main>
+              {pathname !== "/plugins" &&
+                pathname !== "/skills" &&
+                !pathname.startsWith("/code") && <ComputerSidebar />}
+            </div>
           </div>
-        </div>
-      </SkillSelectionProvider>
+        </SkillSelectionProvider>
+      </ActiveBotProvider>
     </AssistantRuntimeProvider>
   );
 };

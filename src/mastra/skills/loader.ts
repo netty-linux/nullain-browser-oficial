@@ -346,10 +346,17 @@ export function listUserSkillNames(ownerId: string): string[] {
     .map((skill) => skill.name);
 }
 
-export function skillsIndexPrompt(disabled: readonly string[] = [], ownerId?: string): string {
+export function skillsIndexPrompt(
+  disabled: readonly string[] = [],
+  ownerId?: string,
+  allowedNames?: readonly string[],
+): string {
   const disabledSet = new Set(disabled.map((name) => name.toLowerCase()));
+  const allowed = allowedNames ? new Set(allowedNames.map((name) => name.toLowerCase())) : null;
   const skills = loadSkills(false, ownerId).filter(
-    (skill) => !disabledSet.has(skill.name.toLowerCase()),
+    (skill) =>
+      !disabledSet.has(skill.name.toLowerCase()) &&
+      (!allowed || allowed.has(skill.name.toLowerCase())),
   );
   if (!skills.length) return "";
   return [

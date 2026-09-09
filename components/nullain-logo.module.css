@@ -31,6 +31,20 @@
   mix-blend-mode: screen;
 }
 
+.staticOnly .lightAnimated,
+.staticOnly .darkAnimated {
+  display: none;
+}
+.staticOnly .lightStatic {
+  display: block;
+}
+:global(.dark) .staticOnly .lightStatic {
+  display: none;
+}
+:global(.dark) .staticOnly .darkStatic {
+  display: block;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lightAnimated,
   .darkAnimated {
@@ -50,6 +64,25 @@
   }
 
   :global(.dark) .darkStatic {
+    display: block;
+  }
+
+  /* Chromium on Windows can reject the exported static PNG frames. The
+     official GIF remains a valid branded fallback instead of a broken image. */
+  .staticOnly .lightStatic,
+  :global(.dark) .staticOnly .darkStatic {
+    display: none;
+  }
+
+  .staticOnly .lightAnimated {
+    display: block;
+  }
+
+  :global(.dark) .staticOnly .lightAnimated {
+    display: none;
+  }
+
+  :global(.dark) .staticOnly .darkAnimated {
     display: block;
   }
 }

@@ -4,7 +4,13 @@ import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { getNullainConfig } from "./nullain-config";
 
-const REQUIRED_MIGRATIONS = ["001_better_auth.sql", "002_nullain_code.sql"] as const;
+const REQUIRED_MIGRATIONS = [
+  "001_better_auth.sql",
+  "002_nullain_code.sql",
+  "003_bot_runtime.sql",
+  "004_bot_transcript.sql",
+  "005_bot_openbot_link.sql",
+] as const;
 
 type GlobalDatabase = typeof globalThis & { __nullainAppDatabase?: Database.Database };
 

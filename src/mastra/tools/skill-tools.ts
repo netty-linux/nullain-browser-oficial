@@ -18,7 +18,11 @@ import type { Skill } from "../skills/loader";
  * Também lista os arquivos de apoio para que o
  * agente possa ler material detalhado sob demanda via read_skill_file.
  */
-function createLoadSkillTool(disabledSkills: readonly string[], ownerId?: string) {
+function createLoadSkillTool(
+  disabledSkills: readonly string[],
+  ownerId?: string,
+  allowedNames?: readonly string[],
+) {
   return createTool({
     id: "load_skill",
     description:
@@ -39,7 +43,12 @@ function createLoadSkillTool(disabledSkills: readonly string[], ownerId?: string
       available: z.array(z.string()).optional(),
     }),
     execute: async (input) => {
-      const skill = getSkill(input.name, disabledSkills, ownerId);
+      const candidate = getSkill(input.name, disabledSkills, ownerId);
+      const allowed = allowedNames ? new Set(allowedNames.map((name) => name.toLowerCase())) : null;
+      const skill =
+        candidate && (!allowed || allowed.has(candidate.name.toLowerCase()))
+          ? candidate
+          : undefined;
       if (skill) {
         return {
           found: true,
@@ -69,7 +78,11 @@ function createLoadSkillTool(disabledSkills: readonly string[], ownerId?: string
  * carrega o arquivo quando a skill instruir (ex.: "leia references/api.md
  * se a API retornar erro").
  */
-function createReadSkillFileTool(disabledSkills: readonly string[], ownerId?: string) {
+function createReadSkillFileTool(
+  disabledSkills: readonly string[],
+  ownerId?: string,
+  allowedNames?: readonly string[],
+) {
   return createTool({
     id: "read_skill_file",
     description:
@@ -91,7 +104,12 @@ function createReadSkillFileTool(disabledSkills: readonly string[], ownerId?: st
       error: z.string().optional(),
     }),
     execute: async (input) => {
-      const skill = getSkill(input.skill, disabledSkills, ownerId);
+      const candidate = getSkill(input.skill, disabledSkills, ownerId);
+      const allowed = allowedNames ? new Set(allowedNames.map((name) => name.toLowerCase())) : null;
+      const skill =
+        candidate && (!allowed || allowed.has(candidate.name.toLowerCase()))
+          ? candidate
+          : undefined;
       if (!skill) {
         return {
           found: false,
@@ -201,13 +219,17 @@ function createSkillCreatorTool(ownerId: string) {
 /** Constrói tools isoladas para uma única requisição. */
 export function createSkillsToolset(
   disabledSkills: readonly string[] = [],
-  options: { ownerId?: string; allowCreate?: boolean } = {},
+  options: { ownerId?: string; allowCreate?: boolean; allowedSkillNames?: readonly string[] } = {},
 ) {
   const disabled = [...new Set(disabledSkills)];
   return {
     skills: {
-      load_skill: createLoadSkillTool(disabled, options.ownerId),
-      read_skill_file: createReadSkillFileTool(disabled, options.ownerId),
+      load_skill: createLoadSkillTool(disabled, options.ownerId, options.allowedSkillNames),
+      read_skill_file: createReadSkillFileTool(
+        disabled,
+        options.ownerId,
+        options.allowedSkillNames,
+      ),
       ...(options.ownerId && options.allowCreate
         ? { create_skill: createSkillCreatorTool(options.ownerId) }
         : {}),
