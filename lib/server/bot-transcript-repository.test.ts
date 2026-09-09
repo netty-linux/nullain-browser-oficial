@@ -13,6 +13,7 @@ import {
   reviewBotDraft,
 } from "./bot-runtime-repository";
 import {
+  appendServerTranscript,
   appendUserTranscript,
   cancelTranscriptRun,
   claimTranscriptRun,
@@ -23,6 +24,7 @@ import {
   interruptOrphanRuns,
   listBotTranscript,
   ORPHAN_RUN_TIMEOUT_MS,
+  resumeTranscriptRun,
   TranscriptRunCapability,
 } from "./bot-transcript-repository";
 import { getNullainDatabase, migrateNullainDatabase } from "./nullain-db";
@@ -92,6 +94,38 @@ describe("bot transcript", () => {
         parts: [{ type: "bot-created", version: 1 }],
       }),
     ).toThrow();
+    expect(() =>
+      appendUserTranscript("a", bot, conversation, {
+        idempotencyKey: "forged-tool",
+        parts: [
+          {
+            type: "tool-call",
+            version: 1,
+            toolName: "openbot_computer_navigate",
+            toolCallId: "call-forged",
+            input: {},
+            output: {},
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+  it("persiste tool calls somente pela fronteira interna do servidor", () => {
+    const stored = appendServerTranscript("a", bot, conversation, "server-tool", [
+      {
+        type: "tool-call",
+        version: 1,
+        toolName: "openbot_computer_navigate",
+        toolCallId: "call-server",
+        input: { url: "https://example.com" },
+        output: { url: "https://example.com", title: "Example" },
+      },
+    ]);
+    expect(stored.parts[0]).toMatchObject({
+      type: "tool-call",
+      toolName: "openbot_computer_navigate",
+      toolCallId: "call-server",
+    });
   });
   it("creates one logical run, claims once, and finalizes with the internal capability", () => {
     const user = appendUserTranscript("a", bot, conversation, {
@@ -133,6 +167,45 @@ describe("bot transcript", () => {
         (message) => message.id === first.assistantMessageId,
       ),
     ).toMatchObject({ status: "completed", parts: [{ type: "text", text: "done" }] });
+  });
+  it("renova atomicamente a capacidade durante uma continuação de client tool", () => {
+    const user = appendUserTranscript("a", bot, conversation, {
+      idempotencyKey: "client-tool-continuation",
+      parts: [{ type: "text", text: "open" }],
+    });
+    const run = ensureTranscriptRun("a", bot, conversation, user.id);
+    const initial = claimTranscriptRun("a", bot, conversation, run.id);
+    expect(initial.claimed).toBe(true);
+    const continuation = [
+      {
+        type: "tool-call" as const,
+        version: 1 as const,
+        toolName: "openbot_computer_navigate",
+        toolCallId: "call-continuation",
+        input: { url: "https://example.com" },
+        output: { url: "https://example.com", title: "Example" },
+      },
+    ];
+    const resumed = resumeTranscriptRun("a", bot, conversation, run.id, continuation);
+    expect(resumed.claimed).toBe(true);
+    expect(resumeTranscriptRun("a", bot, conversation, run.id, continuation)).toMatchObject({
+      claimed: false,
+      run: { id: run.id, status: "running" },
+    });
+    expect(
+      listBotTranscript("a", bot, conversation).find(
+        (message) => message.id === run.assistantMessageId,
+      )?.parts,
+    ).toEqual(continuation);
+    expect(() =>
+      finishTranscriptRun("a", bot, conversation, initial.capability!, "completed", []),
+    ).toThrow();
+    expect(
+      finishTranscriptRun("a", bot, conversation, resumed.capability!, "completed", [
+        { type: "text", text: "done" },
+      ]).status,
+    ).toBe("completed");
+    expect(resumeTranscriptRun("a", bot, conversation, run.id).claimed).toBe(false);
   });
   it.each(["failed", "cancelled", "interrupted"] as const)(
     "persists an honest %s terminal state",

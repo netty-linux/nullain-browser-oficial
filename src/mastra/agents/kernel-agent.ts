@@ -27,7 +27,7 @@ import { synthesisAgent } from "./synthesis-agent";
 
 /** Teto global de iterações do kernel e por sub-processo. */
 const KERNEL_MAX_STEPS = 12;
-/** Teto de steps para o research-agent (buscar 1x + ler poucas + sobrar 1). */
+/** Retained as the documented research budget for policy introspection. */
 const RESEARCH_MAX_STEPS = 5;
 /** Teto do coding-agent. */
 const CODING_MAX_STEPS = 6;
@@ -244,7 +244,7 @@ export function kernelStreamOptions({
         iteration: number;
         modifiedMaxSteps?: number;
       }) => {
-        const { primitiveId, prompt, iteration } = context;
+        const { primitiveId, iteration } = context;
 
         // Política de orçamento global: rejeita delegação após o teto para
         // não deixar o kernel em loop. Prova de que o budget virou código.
@@ -272,19 +272,22 @@ export function kernelStreamOptions({
                 "O Computador está desligado pelo usuário (toggle Computador off). Responda com seu conhecimento e diga que não buscou na web.",
             };
           }
-          const policyRule = `\n\n--- POLÍTICA DE PESQUISA (código do kernel) ---\n- Você tem orçamento LIMITADO de steps nesta delegação.\n- Use o computador (openbot_computer_navigate) para abrir uma busca (https://www.bing.com/search?q=<encoded> ou https://news.google.com) e, se preciso, 1-2 fontes.\n- NUNCA abra a mesma URL duas vezes.\n- Deixe pelo menos 1 passo para escrever o resumo com as citações.\n- Se uma página não carregar no computador, abra OUTRA URL — nunca repita a mesma.`;
+          // As ferramentas locais são criadas por request com um escopo
+          // confiável (usuário + bot + conversa). O Mastra não encaminha esse
+          // toolset dinâmico ao subagente. Portanto a pesquisa web é executada
+          // pelo próprio kernel, que possui as ferramentas corretas, em vez de
+          // delegar para um agente sem acesso ou reintroduzir client tools
+          // globais sem isolamento.
           logDelegation(
             primitiveId,
             iteration,
-            "MODIFY",
-            "research: orçamento+URL única+computador injetados",
-            {
-              modifiedMaxSteps: RESEARCH_MAX_STEPS,
-            },
+            "REJECT",
+            "pesquisa direta no kernel com computador local escopado",
           );
           return {
-            modifiedPrompt: `${prompt}${policyRule}`,
-            modifiedMaxSteps: RESEARCH_MAX_STEPS,
+            proceed: false,
+            rejectionReason:
+              "Faça a pesquisa diretamente usando as ferramentas nullain_computer_* disponíveis neste run e depois sintetize a resposta.",
           };
         }
 

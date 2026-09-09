@@ -51,6 +51,8 @@ export const MAX_DESCRIPTION_LENGTH = MAX_SKILL_DESCRIPTION_LENGTH;
 export const MAX_SKILL_BODY_LENGTH = 5 * 1024 * 1024;
 export const MAX_SKILL_RESOURCE_BYTES = 5 * 1024 * 1024;
 export const MAX_SKILL_RESOURCES = 200;
+const MAX_RUNTIME_SKILL_BODY_LENGTH = 32_000;
+const MAX_SKILLS_INDEX_LENGTH = 16_000;
 
 function truncate(text: string, max = 150): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -359,15 +361,20 @@ export function skillsIndexPrompt(
       (!allowed || allowed.has(skill.name.toLowerCase())),
   );
   if (!skills.length) return "";
+  const entries: string[] = [];
+  let used = 0;
+  for (const skill of skills) {
+    const entry = `  <skill><name>${escapeXml(skill.name)}</name><description>${escapeXml(skill.description)}</description></skill>`;
+    if (used + entry.length > MAX_SKILLS_INDEX_LENGTH) break;
+    entries.push(entry);
+    used += entry.length;
+  }
   return [
     "## Available Agent Skills",
     "The following skills provide specialized instructions for specific tasks.",
     "When a task matches a skill description, call load_skill with its exact name before proceeding.",
     "<available_skills>",
-    ...skills.map(
-      (skill) =>
-        `  <skill><name>${escapeXml(skill.name)}</name><description>${escapeXml(skill.description)}</description></skill>`,
-    ),
+    ...entries,
     "</available_skills>",
   ].join("\n");
 }
@@ -385,7 +392,9 @@ export function skillContentEnvelope(skill: Skill): string {
   const files = listSkillFiles(skill);
   return [
     `<skill_content name="${escapeXml(skill.name)}">`,
-    skill.body,
+    skill.body.length > MAX_RUNTIME_SKILL_BODY_LENGTH
+      ? `${skill.body.slice(0, MAX_RUNTIME_SKILL_BODY_LENGTH)}\n\n[Skill instructions truncated for the model context. Load specific resource files as needed.]`
+      : skill.body,
     "",
     "Relative resource paths are resolved from this skill's directory.",
     ...(files.length

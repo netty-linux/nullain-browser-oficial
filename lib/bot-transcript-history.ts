@@ -3,6 +3,7 @@
 import type {
   GenericThreadHistoryAdapter,
   MessageFormatAdapter,
+  MessageFormatRepository,
   ThreadHistoryAdapter,
 } from "@assistant-ui/react";
 import type { UIMessage } from "ai";
@@ -19,10 +20,29 @@ type TranscriptMessage = {
 
 function toUIParts(message: TranscriptMessage): UIMessage["parts"] {
   const result: UIMessage["parts"] = [];
+  let restoredTool = false;
   for (const part of message.parts) {
-    if (part.type === "text" && typeof part.text === "string")
+    if (part.type === "text" && typeof part.text === "string") {
+      if (restoredTool) {
+        result.push({ type: "step-start" });
+        restoredTool = false;
+      }
       result.push({ type: "text", text: part.text });
-    else if (part.type === "bot-review" || part.type === "bot-created")
+    } else if (
+      part.type === "tool-call" &&
+      part.version === 1 &&
+      typeof part.toolName === "string" &&
+      typeof part.toolCallId === "string"
+    ) {
+      result.push({
+        type: `tool-${part.toolName}`,
+        toolCallId: part.toolCallId,
+        state: "output-available",
+        input: part.input,
+        output: part.output,
+      } as UIMessage["parts"][number]);
+      restoredTool = true;
+    } else if (part.type === "bot-review" || part.type === "bot-created")
       result.push({ type: `data-${part.type}`, data: part });
   }
   return result;
@@ -45,6 +65,33 @@ function readSelection() {
   return botId && clientConversationId ? { botId, clientConversationId } : null;
 }
 
+const transcriptTargetRequests = new Map<string, Promise<BotTranscriptTarget>>();
+
+export function resolveTranscriptTarget(selection: {
+  botId: string;
+  clientConversationId: string;
+}) {
+  const key = `${selection.botId}:${selection.clientConversationId}`;
+  const cached = transcriptTargetRequests.get(key);
+  if (cached) return cached;
+  const request = fetch(`/api/bots/${encodeURIComponent(selection.botId)}/conversations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ clientConversationId: selection.clientConversationId }),
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error("Não foi possível abrir a conversa do bot.");
+      const body = (await response.json()) as { conversation: { id: string } };
+      return { ...selection, conversationId: body.conversation.id };
+    })
+    .catch((error) => {
+      transcriptTargetRequests.delete(key);
+      throw error;
+    });
+  transcriptTargetRequests.set(key, request);
+  return request;
+}
+
 export function useBotTranscriptTarget() {
   const [target, setTarget] = useState<BotTranscriptTarget | null>(null);
   useEffect(() => {
@@ -53,17 +100,8 @@ export function useBotTranscriptTarget() {
       const selection = readSelection();
       const current = ++generation;
       if (!selection) return setTarget(null);
-      const response = await fetch(
-        `/api/bots/${encodeURIComponent(selection.botId)}/conversations`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ clientConversationId: selection.clientConversationId }),
-        },
-      );
-      if (!response.ok) throw new Error("Não foi possível abrir a conversa do bot.");
-      const body = (await response.json()) as { conversation: { id: string } };
-      if (current === generation) setTarget({ ...selection, conversationId: body.conversation.id });
+      const resolved = await resolveTranscriptTarget(selection);
+      if (current === generation) setTarget(resolved);
     };
     void resolve().catch(console.error);
     window.addEventListener("nullain-bot-changed", resolve);
@@ -77,6 +115,37 @@ export function useBotTranscriptTarget() {
 
 export async function loadBotTranscript(target: BotTranscriptTarget): Promise<UIMessage[]> {
   return (await readBotTranscript(target)).messages;
+}
+
+export function mergeBotTranscriptMessages(
+  current: readonly UIMessage[],
+  incoming: readonly UIMessage[],
+): UIMessage[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) byId.set(message.id, message);
+  return [...byId.values()].sort((left, right) => {
+    const leftSequence = (left.metadata as { nullainSequence?: unknown } | undefined)
+      ?.nullainSequence;
+    const rightSequence = (right.metadata as { nullainSequence?: unknown } | undefined)
+      ?.nullainSequence;
+    return (
+      (typeof leftSequence === "number" ? leftSequence : 0) -
+      (typeof rightSequence === "number" ? rightSequence : 0)
+    );
+  });
+}
+
+/** Formato público esperado por `useChatRuntime().thread.importExternalState`. */
+export function toBotTranscriptRepository(
+  messages: readonly UIMessage[],
+): MessageFormatRepository<UIMessage> {
+  let parentId: string | null = null;
+  const items = messages.map((message) => {
+    const item = { parentId, message };
+    parentId = message.id;
+    return item;
+  });
+  return { headId: parentId, messages: items };
 }
 
 export async function readBotTranscript(

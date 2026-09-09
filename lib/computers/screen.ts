@@ -1,4 +1,4 @@
-import { tryClient } from "./client";
+import { computerUrl, tryClient } from "./client";
 
 /**
  * Um frame da tela do Bot. Polling (não cacheado): cada leitura é um frame
@@ -13,6 +13,11 @@ export type Screenshot = {
   url?: string;
 };
 
+type ScreenOptions = {
+  /** Proxy do computador. Default: legado `/api/computers`. */
+  basePath?: string;
+};
+
 /**
  * Lê o frame atual. Falha fechada, explicando por quê: a tela indisponível é
  * uma informação que quem observa precisa saber, não motivo para derrubar o
@@ -20,10 +25,11 @@ export type Screenshot = {
  */
 export async function readScreenshot(
   computerId: string,
+  options: ScreenOptions = {},
 ): Promise<{ frame?: Screenshot; error?: string }> {
   const unavailable = "The screen is not available right now.";
   try {
-    const response = await tryClient(`/api/computers/${computerId}/screenshot`);
+    const response = await tryClient(computerUrl(computerId, "/screenshot", options.basePath));
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as {
         error?: string;
@@ -47,10 +53,11 @@ export type PageFrame = { url: string; title: string | null; frame: string };
 export async function readPageFrame(
   computerId: string,
   toolCallId: string,
+  options: ScreenOptions = {},
 ): Promise<PageFrame | null> {
   try {
     const response = await tryClient(
-      `/api/computers/${computerId}/page-frame/${encodeURIComponent(toolCallId)}`,
+      computerUrl(computerId, `/page-frame/${encodeURIComponent(toolCallId)}`, options.basePath),
     );
     if (!response.ok) return null;
     const body = (await response.json()) as { frame?: PageFrame | null };

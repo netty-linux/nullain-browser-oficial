@@ -1,4 +1,9 @@
 import { isSupportedImageMediaType } from "../model-catalog";
+import { compactComputerToolOutput } from "./bot-agent-input";
+
+const MAX_CONTEXT_MESSAGES = 40;
+const MAX_TEXT_PART_CHARS = 12_000;
+const MAX_CONTEXT_TEXT_CHARS = 48_000;
 
 type MessageLike = {
   role?: unknown;
@@ -120,7 +125,7 @@ export function pruneMessageHistory(
     }
   }
 
-  const pruned = messages
+  const imagePruned = messages
     .filter((raw) => {
       const message = raw as MessageLike | undefined;
       if (!message) return false;
@@ -150,6 +155,35 @@ export function pruneMessageHistory(
       }
       return replaceMessageParts(message, kept);
     });
+
+  let remainingText = MAX_CONTEXT_TEXT_CHARS;
+  const pruned = imagePruned
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .reverse()
+    .map((message) => {
+      const messageParts = getMessageParts(message);
+      if (!messageParts) return message;
+      const bounded = messageParts.flatMap((part) => {
+        if (!part || typeof part !== "object") return [part];
+        const candidate = part as { type?: unknown; text?: unknown; output?: unknown };
+        if (candidate.type === "text" && typeof candidate.text === "string") {
+          if (remainingText <= 0) return [];
+          const length = Math.min(candidate.text.length, MAX_TEXT_PART_CHARS, remainingText);
+          remainingText -= length;
+          return [{ ...candidate, text: candidate.text.slice(0, length) }];
+        }
+        if (
+          typeof candidate.type === "string" &&
+          (candidate.type.startsWith("tool-openbot_computer_") ||
+            candidate.type.startsWith("tool-nullain_computer_"))
+        ) {
+          return [{ ...candidate, output: compactComputerToolOutput(candidate.output) }];
+        }
+        return [part];
+      });
+      return replaceMessageParts(message, bounded);
+    })
+    .reverse();
 
   return { messages: pruned, stats: { droppedImageParts, droppedEmptyAssistant } };
 }

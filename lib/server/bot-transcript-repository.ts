@@ -29,6 +29,14 @@ const runCapabilities = new WeakMap<
 >();
 export type TranscriptPart =
   | { type: "text"; text: string }
+  | {
+      type: "tool-call";
+      version: 1;
+      toolName: string;
+      toolCallId: string;
+      input: unknown;
+      output: unknown;
+    }
   | { type: "bot-review" | "bot-created"; version: 1; [key: string]: unknown };
 export type TranscriptMessage = {
   id: string;
@@ -63,10 +71,24 @@ function parts(value: unknown, allowStructured = true): TranscriptPart[] {
         ? (part as { type?: unknown; version?: unknown }).type
         : undefined;
     if (
-      (type !== "text" && type !== "bot-review" && type !== "bot-created") ||
+      (type !== "text" &&
+        type !== "tool-call" &&
+        type !== "bot-review" &&
+        type !== "bot-created") ||
       (type !== "text" && (!allowStructured || (part as { version?: unknown }).version !== 1))
     )
       throw new Error("Parte desconhecida.");
+    if (type === "tool-call") {
+      const tool = part as { toolName?: unknown; toolCallId?: unknown };
+      if (
+        typeof tool.toolName !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(tool.toolName) ||
+        typeof tool.toolCallId !== "string" ||
+        tool.toolCallId.length < 1 ||
+        tool.toolCallId.length > 256
+      )
+        throw new Error("Tool call inválida.");
+    }
   }
   return value as TranscriptPart[];
 }
@@ -273,6 +295,77 @@ export function claimTranscriptRun(
   const capability = new TranscriptRunCapability();
   runCapabilities.set(capability, { runId, token });
   return { run: row, claimed: true, capability };
+}
+
+/** Renova no servidor a capacidade de um run que aguarda uma client tool. */
+export function resumeTranscriptRun(
+  owner: string,
+  bot: string,
+  conversationId: string,
+  runId: string,
+  continuationParts?: unknown,
+): { run: TranscriptRun; claimed: boolean; capability?: TranscriptRunCapability } {
+  conversation(owner, bot, conversationId);
+  const db = getNullainDatabase();
+  const token = randomUUID();
+  const now = Date.now();
+  const continuation =
+    continuationParts === undefined
+      ? null
+      : parts(continuationParts).filter(
+          (part): part is Extract<TranscriptPart, { type: "tool-call" }> =>
+            part.type === "tool-call",
+        );
+  const result = db.transaction(() => {
+    const current = db
+      .prepare("SELECT * FROM nullain_bot_run WHERE id=? AND botConversationId=?")
+      .get(runId, conversationId) as InternalRun | undefined;
+    if (!current) throw new Response("Execução não encontrada.", { status: 404 });
+    if (current.status !== "running" || !current.claimToken)
+      return { run: current as TranscriptRun, claimed: false };
+    if (continuation) {
+      if (continuation.length === 0) throw new Error("Continuação de ferramenta inválida.");
+      const assistant = db
+        .prepare(
+          "SELECT partsJson FROM nullain_bot_message WHERE id=? AND botConversationId=? AND role='assistant'",
+        )
+        .get(current.assistantMessageId, conversationId) as { partsJson: string } | undefined;
+      if (!assistant) throw new Response("Mensagem não encontrada.", { status: 404 });
+      const existing = parts(JSON.parse(assistant.partsJson));
+      const existingCalls = new Set(
+        existing
+          .filter(
+            (part): part is Extract<TranscriptPart, { type: "tool-call" }> =>
+              part.type === "tool-call",
+          )
+          .map((part) => part.toolCallId),
+      );
+      if (continuation.every((part) => existingCalls.has(part.toolCallId)))
+        return { run: current as TranscriptRun, claimed: false };
+      const merged = [
+        ...existing,
+        ...continuation.filter((part) => !existingCalls.has(part.toolCallId)),
+      ];
+      db.prepare(
+        "UPDATE nullain_bot_message SET partsJson=?,updatedAt=? WHERE id=? AND botConversationId=? AND role='assistant' AND status='streaming'",
+      ).run(JSON.stringify(parts(merged)), now, current.assistantMessageId, conversationId);
+    }
+    const changed = db
+      .prepare(
+        "UPDATE nullain_bot_run SET claimToken=?,updatedAt=? WHERE id=? AND botConversationId=? AND status='running' AND claimToken=? AND updatedAt=?",
+      )
+      .run(token, now, runId, conversationId, current.claimToken, current.updatedAt).changes;
+    const run = db
+      .prepare(
+        "SELECT id,botConversationId,userMessageId,assistantMessageId,status,createdAt,updatedAt,publicError FROM nullain_bot_run WHERE id=? AND botConversationId=?",
+      )
+      .get(runId, conversationId) as TranscriptRun;
+    return { run, claimed: changed === 1 };
+  })();
+  if (!result.claimed) return result;
+  const capability = new TranscriptRunCapability();
+  runCapabilities.set(capability, { runId, token });
+  return { ...result, capability };
 }
 
 export function cancelTranscriptRun(

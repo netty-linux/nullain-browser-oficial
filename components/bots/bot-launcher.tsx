@@ -1,11 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
 import { BotAvatar } from "./bot-avatar";
-import {
-  clearBotComputerLink,
-  readBotComputerLink,
-  saveBotComputerLink,
-} from "@/lib/bot-transcript-history";
 import { CHAT_MODEL_IDS } from "@/lib/model-catalog";
 
 type Bot = {
@@ -26,12 +21,6 @@ export function BotLauncher() {
     [managingId, setManagingId] = useState<string | null>(null),
     [manageBusy, setManageBusy] = useState(false),
     [manageError, setManageError] = useState(""),
-    [computerBotId, setComputerBotId] = useState<string | null>(null),
-    [computerEnabled, setComputerEnabled] = useState(false),
-    [computerAgentId, setComputerAgentId] = useState<string | null>(null),
-    [computerDraft, setComputerDraft] = useState(""),
-    [computerBusy, setComputerBusy] = useState(false),
-    [computerError, setComputerError] = useState(""),
     [editingBotId, setEditingBotId] = useState<string | null>(null),
     [editRevision, setEditRevision] = useState(1),
     [editName, setEditName] = useState(""),
@@ -164,61 +153,6 @@ export function BotLauncher() {
       setManagingId(null);
     }
   };
-  const openComputer = async (bot: Bot) => {
-    setComputerBotId(bot.id);
-    setComputerError("");
-    setComputerBusy(true);
-    try {
-      const link = await readBotComputerLink(bot.id);
-      setComputerEnabled(link.enabled);
-      setComputerAgentId(link.openbotAgentId);
-      setComputerDraft(link.openbotAgentId ?? "");
-    } catch (cause) {
-      setComputerEnabled(false);
-      setComputerAgentId(null);
-      setComputerError(
-        cause instanceof Error ? cause.message : "Não foi possível carregar o computador.",
-      );
-    } finally {
-      setComputerBusy(false);
-    }
-  };
-  const saveComputer = async () => {
-    if (!computerBotId) return;
-    const value = computerDraft.trim();
-    if (!value) {
-      setComputerError("Informe o identificador do agente OpenBot.");
-      return;
-    }
-    setComputerBusy(true);
-    setComputerError("");
-    try {
-      await saveBotComputerLink(computerBotId, value);
-      setComputerAgentId(value);
-    } catch (cause) {
-      setComputerError(
-        cause instanceof Error ? cause.message : "Não foi possível vincular o computador.",
-      );
-    } finally {
-      setComputerBusy(false);
-    }
-  };
-  const unlinkComputer = async () => {
-    if (!computerBotId) return;
-    setComputerBusy(true);
-    setComputerError("");
-    try {
-      await clearBotComputerLink(computerBotId);
-      setComputerAgentId(null);
-      setComputerDraft("");
-    } catch (cause) {
-      setComputerError(
-        cause instanceof Error ? cause.message : "Não foi possível desvincular o computador.",
-      );
-    } finally {
-      setComputerBusy(false);
-    }
-  };
   const openEdit = async (bot: Bot) => {
     setEditingBotId(bot.id);
     setEditError("");
@@ -347,15 +281,6 @@ export function BotLauncher() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => void openComputer(bot)}
-                  title={`Computador de ${bot.name}`}
-                  aria-label={`Computador de ${bot.name}`}
-                  className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                >
-                  Computador
-                </button>
-                <button
-                  type="button"
                   onClick={() => void openEdit(bot)}
                   title={`Configurar ${bot.name}`}
                   aria-label={`Configurar ${bot.name}`}
@@ -408,69 +333,6 @@ export function BotLauncher() {
               >
                 {busy ? "Criando…" : "Revisar e criar"}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {computerBotId && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Computador do bot"
-          className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
-        >
-          <div className="w-full max-w-md rounded-xl border border-border bg-background p-5 shadow-xl">
-            <h2 className="text-lg font-semibold">Computador do bot</h2>
-            {!computerEnabled ? (
-              <p className="mt-2 text-sm text-muted-foreground">
-                O vínculo de computador por bot está desativado neste ambiente
-                (NULLAIN_BOT_COMPUTER). O bot usa o computador padrão da Nullain.
-              </p>
-            ) : (
-              <>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Vincule este bot a um agente autorizado do OpenBot. O identificador do computador
-                  é resolvido no servidor a partir deste vínculo.
-                </p>
-                <label className="mt-4 block text-sm">
-                  Identificador do agente OpenBot
-                  <input
-                    value={computerDraft}
-                    onChange={(event) => setComputerDraft(event.target.value)}
-                    placeholder="agent_..."
-                    className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
-                  />
-                </label>
-                {computerAgentId && (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Vinculado a: <span className="font-mono">{computerAgentId}</span>
-                  </p>
-                )}
-              </>
-            )}
-            {computerError && <p className="mt-2 text-sm text-destructive">{computerError}</p>}
-            <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setComputerBotId(null)} className="rounded-lg px-3 py-2">
-                Fechar
-              </button>
-              {computerEnabled && computerAgentId && (
-                <button
-                  disabled={computerBusy}
-                  onClick={() => void unlinkComputer()}
-                  className="rounded-lg border px-3 py-2 disabled:opacity-50"
-                >
-                  Desvincular
-                </button>
-              )}
-              {computerEnabled && (
-                <button
-                  disabled={computerBusy || !computerDraft.trim()}
-                  onClick={() => void saveComputer()}
-                  className="rounded-lg bg-foreground px-3 py-2 text-background disabled:opacity-50"
-                >
-                  {computerBusy ? "Salvando…" : "Salvar vínculo"}
-                </button>
-              )}
             </div>
           </div>
         </div>

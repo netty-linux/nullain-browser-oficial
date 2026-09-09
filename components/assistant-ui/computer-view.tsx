@@ -5,6 +5,7 @@ import {
   type ControlState,
   readControl,
   releaseControl,
+  sendHumanInput,
   supplySecret,
   takeControl,
 } from "@/lib/computers/control";
@@ -123,6 +124,8 @@ const SECRET_CONFIRM_MS = 6_000;
 
 type Props = {
   computerId: string;
+  /** Raiz completa do proxy. Sem ela, usa o computador legado por id. */
+  basePath?: string;
   active?: boolean;
   intervalMs?: number;
   aspectRatio?: number;
@@ -142,6 +145,7 @@ type Props = {
  */
 export function ComputerView({
   computerId,
+  basePath,
   active = true,
   intervalMs = 1000,
   aspectRatio = DEFAULT_ASPECT_RATIO,
@@ -164,7 +168,7 @@ export function ComputerView({
   drivingRef.current = driving;
 
   const handBack = async () => {
-    const state = await releaseControl(computerId);
+    const state = await releaseControl(computerId, { basePath });
     if (state) setControl(state);
   };
 
@@ -194,7 +198,7 @@ export function ComputerView({
     if (remembered?.frame || remembered?.asked) return;
     let current = true;
     void (async () => {
-      const stored = await readPageFrame(computerId, toolCallId);
+      const stored = await readPageFrame(computerId, toolCallId, { basePath });
       if (!current) return;
       rememberTurn(toolCallId, {
         asked: true,
@@ -205,7 +209,7 @@ export function ComputerView({
     return () => {
       current = false;
     };
-  }, [computerId, toolCallId, settled]);
+  }, [computerId, basePath, toolCallId, settled]);
 
   // Polling de screenshot.
   useEffect(() => {
@@ -227,7 +231,7 @@ export function ComputerView({
 
     const tick = async () => {
       try {
-        const { frame, error } = await readScreenshot(computerId);
+        const { frame, error } = await readScreenshot(computerId, { basePath });
         if (generation.current !== mine) return;
         if (!frame) {
           setProblem(error ?? "The screen is not available right now.");
@@ -253,7 +257,7 @@ export function ComputerView({
     };
     // secretPending reinicia o polling por design (via ref).
     // biome-ignore lint/correctness/useExhaustiveDependencies: driving é via ref.
-  }, [computerId, active, intervalMs, secretPending, settled]);
+  }, [computerId, basePath, active, intervalMs, secretPending, settled]);
 
   // Polling de controle (para pedidos de ajuda/secret aparecerem).
   useEffect(() => {
@@ -261,7 +265,7 @@ export function ComputerView({
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
-      const state = await readControl(computerId);
+      const state = await readControl(computerId, { basePath });
       if (!live) return;
       if (state) setControl(state);
       timer = setTimeout(tick, 1000);
@@ -271,7 +275,7 @@ export function ComputerView({
       live = false;
       clearTimeout(timer);
     };
-  }, [computerId, settled]);
+  }, [computerId, basePath, settled]);
 
   const blankBrowser = !settled && shot ? isBlankBrowser(shot) : false;
   const frameStyle = { aspectRatio, minWidth, minHeight };
@@ -279,6 +283,23 @@ export function ComputerView({
   const drawn = settled ? keptFrame : shot ? { base64: shot.base64, url: shot.url ?? "" } : null;
   const showScreen = drawn !== null && !blankBrowser;
   const wheelHere = driving && !settled;
+
+  const sendKey = (event: React.KeyboardEvent<HTMLImageElement>) => {
+    if (!driving || settled) return;
+    const modifiers = [
+      event.ctrlKey ? "Control" : "",
+      event.altKey ? "Alt" : "",
+      event.shiftKey ? "Shift" : "",
+      event.metaKey ? "Meta" : "",
+    ].filter(Boolean);
+    if (event.key.length === 1 && modifiers.length === 0) {
+      sendHumanInput(computerId, "type", { text: event.key }, { basePath });
+    } else {
+      const key = [...modifiers, event.key].join("+");
+      sendHumanInput(computerId, "key", { key }, { basePath });
+    }
+    event.preventDefault();
+  };
 
   return (
     <>
@@ -332,7 +353,7 @@ export function ComputerView({
             <Button
               size="sm"
               onClick={async () => {
-                const state = await takeControl(computerId);
+                const state = await takeControl(computerId, { basePath });
                 if (state) setControl(state);
                 setExpanded(true);
               }}
@@ -351,11 +372,11 @@ export function ComputerView({
               if (!secret || sendingSecret) return;
               setSendingSecret(true);
               watchUntil.current = Date.now() + SECRET_CONFIRM_MS;
-              const result = await supplySecret(computerId, secret);
+              const result = await supplySecret(computerId, secret, { basePath });
               setSendingSecret(false);
               setSecret("");
               setSecretProblem(result.ok ? null : (result.error ?? null));
-              const state = await readControl(computerId);
+              const state = await readControl(computerId, { basePath });
               if (state) setControl(state);
             }}
           >
@@ -410,7 +431,7 @@ export function ComputerView({
               <Button
                 size="sm"
                 onClick={async () => {
-                  const state = await takeControl(computerId);
+                  const state = await takeControl(computerId, { basePath });
                   if (state) setControl(state);
                   setExpanded(true);
                 }}
@@ -428,7 +449,35 @@ export function ComputerView({
             <img
               src={`data:image/png;base64,${drawn.base64}`}
               alt="Tela ampliada do computador da assistente"
-              className="h-full min-h-0 w-full rounded-lg object-contain"
+              tabIndex={driving && !settled ? 0 : -1}
+              onKeyDown={sendKey}
+              onClick={(event) => {
+                if (!driving || settled) return;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                const width = shot?.width ?? 1280;
+                const height = shot?.height ?? 800;
+                sendHumanInput(
+                  computerId,
+                  "click",
+                  {
+                    x: ((event.clientX - bounds.left) / bounds.width) * width,
+                    y: ((event.clientY - bounds.top) / bounds.height) * height,
+                  },
+                  { basePath },
+                );
+                event.currentTarget.focus();
+              }}
+              onWheel={(event) => {
+                if (!driving || settled) return;
+                event.preventDefault();
+                sendHumanInput(computerId, "scroll", { deltaY: event.deltaY }, { basePath });
+              }}
+              className={cn(
+                "max-h-full min-h-0 max-w-full rounded-lg object-contain outline-none",
+                driving &&
+                  !settled &&
+                  "cursor-crosshair focus-visible:ring-2 focus-visible:ring-ring",
+              )}
             />
           ) : null}
         </DialogContent>

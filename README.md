@@ -11,7 +11,7 @@ Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant
 ## Recursos
 
 - Kernel supervisor com processos especializados de pesquisa, código e síntese.
-- Pesquisa pela web exclusivamente pelo Computador/OpenBot, controlada pelo usuário.
+- Pesquisa pela web exclusivamente pelo Computador local isolado, controlada pelo usuário.
 - Memória persistente em LibSQL por conversa.
 - Biblioteca de Skills com nativas protegidas, catálogo privado por conta e seleção por `/` no chat.
 - Plugins via Composio MCP.
@@ -23,7 +23,7 @@ Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant
 
 - Node.js 20 ou superior.
 - Chave da Ollama Cloud.
-- OpenBot em `http://localhost:3001` para recursos do Computador.
+- Docker Desktop ou Docker Engine para o Computador local (`npm run computer:up`).
 
 Copie `.env.example` para `.env.local`, preencha as variáveis necessárias e execute:
 
@@ -38,7 +38,7 @@ A interface fica disponível em `http://localhost:3000`.
 
 ```text
 Usuário → /api/chat → kernelAgent
-                         ├─ researchAgent → Computador/OpenBot
+                         ├─ pesquisa direta → Computador local escopado por conversa
                          ├─ codingAgent
                          └─ synthesisAgent
 ```
@@ -47,10 +47,30 @@ Usuário → /api/chat → kernelAgent
 - `src/mastra/agents/kernel-agent.ts`: supervisor, memória e políticas de delegação.
 - `src/mastra/agents/*-agent.ts`: processos especializados.
 - `src/mastra/tools`: skills, Computador e geração de mídia.
-- `app/api/computers`: proxy restrito para o Computador do OpenBot.
+- `app/api/bots/[id]/conversations/[conversationId]/computer`: API autenticada do Computador local.
 - `app/api/ag-ui`: integração autenticada com clientes AG-UI.
 
 O `chatAgent` permanece registrado somente para compatibilidade com clientes legados.
+
+## Computador local
+
+O toggle **Computador** disponibiliza ao kernel um Chromium real executado localmente em Docker.
+Cada sessão é derivada no servidor por usuário, bot e conversa; esses identificadores não são
+aceitos como autoridade a partir do navegador. O runtime bloqueia redes locais/privadas, downloads
+automáticos e service workers, exige entrega explícita de controle para entrada humana e restaura a
+aba ativa depois de reinícios do processo web enquanto o container continuar vivo.
+
+```bash
+npm run computer:up
+npm run computer:status
+npm run computer:down
+```
+
+A imagem do container está fixada por digest e escuta somente em `127.0.0.1`. Nenhum diretório do
+Windows, Docker socket ou credencial do host é montado no container. Para permitir deliberadamente
+uma intranet de desenvolvimento, use `NULLAIN_LOCAL_COMPUTER_ALLOW_PRIVATE_NETWORK=1`; o padrão é
+falhar fechado. O computador local é um navegador isolado, não um terminal nem acesso ao filesystem
+do Windows.
 
 ## Skills
 

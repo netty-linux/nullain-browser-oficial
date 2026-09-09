@@ -61,6 +61,16 @@ describe("skill availability", () => {
     expect(prompt).toContain(creator!.body);
   });
 
+  it("limita o corpo de uma skill somente no prompt de runtime", () => {
+    const creator = loadSkills(true).find((skill) => skill.name === "skill-creator");
+    expect(creator).toBeDefined();
+    const oversized = { ...creator!, body: "x".repeat(100_000) };
+    const prompt = skillContentEnvelope(oversized);
+    expect(prompt.length).toBeLessThan(34_000);
+    expect(prompt).toContain("Skill instructions truncated");
+    expect(oversized.body).toHaveLength(100_000);
+  });
+
   it("isolates user skills and treats an identical retry as idempotent", () => {
     const name = `test-skill-${Date.now()}`;
     const ownerA = `owner-a-${name}`;

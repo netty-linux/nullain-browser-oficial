@@ -7,6 +7,117 @@ const TAG_PATTERNS = [
 ] as const;
 
 const SELF_CLOSING_TAGS = ["<think/>"] as const;
+const HARMONY_START = "<|start|>";
+const HARMONY_CHANNEL = "<|channel|>";
+const HARMONY_MESSAGE = "<|message|>";
+const HARMONY_END = "<|end|>";
+
+type HarmonyPhase = "plain" | "header" | "channel" | "content";
+
+function safePrefixLength(value: string, markers: readonly string[]): number {
+  let retained = 0;
+  for (const marker of markers) {
+    const max = Math.min(value.length, marker.length - 1);
+    for (let length = max; length > retained; length -= 1) {
+      if (marker.startsWith(value.slice(-length))) {
+        retained = length;
+        break;
+      }
+    }
+  }
+  return value.length - retained;
+}
+
+/**
+ * Remove o protocolo Harmony que alguns modelos Ollama devolvem dentro do
+ * próprio text-delta. O parser é incremental porque os tokens podem ser
+ * divididos entre chunks; somente o canal `final` vira texto visível.
+ */
+export function createHarmonyTextSanitizer() {
+  let phase: HarmonyPhase = "plain";
+  let channel = "";
+  let buffer = "";
+
+  const process = (flush = false) => {
+    let output = "";
+    while (buffer) {
+      if (phase === "plain") {
+        const start = buffer.indexOf(HARMONY_START);
+        const channelStart = buffer.indexOf(HARMONY_CHANNEL);
+        const candidates = [start, channelStart].filter((index) => index >= 0);
+        if (candidates.length) {
+          const index = Math.min(...candidates);
+          output += buffer.slice(0, index);
+          if (index === start) {
+            buffer = buffer.slice(index + HARMONY_START.length);
+            phase = "header";
+          } else {
+            buffer = buffer.slice(index + HARMONY_CHANNEL.length);
+            phase = "channel";
+          }
+          continue;
+        }
+        const safe = flush
+          ? buffer.length
+          : safePrefixLength(buffer, [HARMONY_START, HARMONY_CHANNEL]);
+        output += buffer.slice(0, safe);
+        buffer = buffer.slice(safe);
+        break;
+      }
+
+      if (phase === "header") {
+        const index = buffer.indexOf(HARMONY_CHANNEL);
+        if (index >= 0) {
+          buffer = buffer.slice(index + HARMONY_CHANNEL.length);
+          phase = "channel";
+          continue;
+        }
+        if (flush) buffer = "";
+        else {
+          const safe = safePrefixLength(buffer, [HARMONY_CHANNEL]);
+          buffer = buffer.slice(safe);
+        }
+        break;
+      }
+
+      if (phase === "channel") {
+        const index = buffer.indexOf(HARMONY_MESSAGE);
+        if (index >= 0) {
+          channel = buffer.slice(0, index).trim().toLowerCase();
+          buffer = buffer.slice(index + HARMONY_MESSAGE.length);
+          phase = "content";
+          continue;
+        }
+        if (flush) buffer = "";
+        break;
+      }
+
+      const end = buffer.indexOf(HARMONY_END);
+      if (end >= 0) {
+        if (channel === "final") output += buffer.slice(0, end);
+        buffer = buffer.slice(end + HARMONY_END.length);
+        channel = "";
+        phase = "plain";
+        continue;
+      }
+      const safe = flush ? buffer.length : safePrefixLength(buffer, [HARMONY_END]);
+      if (channel === "final") output += buffer.slice(0, safe);
+      buffer = buffer.slice(safe);
+      break;
+    }
+    return output;
+  };
+
+  return {
+    push(text: string) {
+      buffer += text;
+      return process(false);
+    },
+    flush() {
+      return process(true);
+    },
+  };
+}
 
 const CHINESE_MARKER = "\u601D\u8003\uFF1A";
 const CHINESE_END_MARKERS = [
@@ -135,6 +246,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
     // duplicado (nativo + re-extraído do texto), e o reasoning apareceria 2x
     // na mensagem final.
     let sawNativeReasoning = false;
+    const harmony = createHarmonyTextSanitizer();
 
     function makeChunk(type: string, payload: Record<string, unknown>): ChunkType<undefined> {
       return { type, runId, from: chunkFrom, payload } as ChunkType<undefined>;
@@ -215,6 +327,18 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
       }
     }
 
+    function processVisibleText(
+      controller: TransformStreamDefaultController<ChunkType<undefined>>,
+      text: string,
+    ) {
+      if (!text) return;
+      if (sawNativeReasoning) emitText(controller, text);
+      else {
+        buffer += text;
+        processBuffer(controller);
+      }
+    }
+
     return new TransformStream<ChunkType<undefined>, ChunkType<undefined>>({
       transform(chunk, controller) {
         if (!runId) runId = chunk.runId;
@@ -232,6 +356,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
         }
 
         if (chunk.type === "text-end") {
+          processVisibleText(controller, harmony.flush());
           if (buffer) {
             processBuffer(controller);
             buffer = "";
@@ -267,13 +392,8 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
           if (payload?.id) textId = payload.id;
           // Com reasoning nativo, o texto vai direto (sem procurar tags inline
           // — evitaria duplicar o que já veio como reasoning-delta nativo).
-          if (sawNativeReasoning) {
-            if (payload?.text) controller.enqueue(chunk);
-            return;
-          }
           if (payload?.text) {
-            buffer += payload.text;
-            processBuffer(controller);
+            processVisibleText(controller, harmony.push(payload.text));
           }
           return;
         }
@@ -290,6 +410,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
       },
 
       flush(controller) {
+        processVisibleText(controller, harmony.flush());
         if (buffer) {
           if (phase === "text") {
             buffer = removeSelfClosingTags(buffer);

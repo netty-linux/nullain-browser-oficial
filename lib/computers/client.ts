@@ -28,3 +28,16 @@ async function send(path: string, options: ClientOptions): Promise<Response> {
 export function tryClient(path: string, options: ClientOptions = {}): Promise<Response> {
   return send(path, options);
 }
+
+/**
+ * Monta a URL de um endpoint de computador.
+ *
+ * Sem `basePath`, usa o proxy legado e inclui o id do computador. Quando um
+ * `basePath` é informado, ele já representa a raiz completa do computador.
+ * Isso permite ao proxy governado `/api/bots/:botId/computer` resolver o agente
+ * no servidor sem receber o id do OpenBot como parte autoritativa da rota.
+ */
+export function computerUrl(computerId: string, rest: string, basePath?: string): string {
+  const root = basePath ?? `/api/computers/${encodeURIComponent(computerId)}`;
+  return `${root}${rest}`;
+}

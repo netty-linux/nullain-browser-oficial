@@ -8,7 +8,8 @@ import { thinkingExtractor } from "@/src/mastra/transforms/thinking-stream";
 import { KERNEL_INSTRUCTIONS, kernelStreamOptions } from "@/src/mastra/agents/kernel-agent";
 import { getSkill, selectedSkillPrompt, skillsIndexPrompt } from "@/src/mastra/skills/loader";
 import { createSkillsToolset } from "@/src/mastra/tools/skill-tools";
-import { openbotComputerClientTools } from "@/src/mastra/tools/computer-client-tools";
+import { createLocalComputerTools } from "@/src/mastra/tools/local-computer-tools";
+import { isLocalComputerEnabled } from "@/lib/server/local-computer";
 import { getComposioTools } from "@/src/mastra/integrations/composio-mcp";
 import { getAgentSkillsDocsTools } from "@/src/mastra/integrations/agent-skills-mcp";
 import { sanitizeIntegrationKey } from "@/lib/integration-key";
@@ -29,9 +30,16 @@ import {
   ensureTranscriptRun,
   finishTranscriptRun,
   getTranscriptMessage,
+  listBotTranscript,
+  resumeTranscriptRun,
   type TranscriptRunCapability,
 } from "@/lib/server/bot-transcript-repository";
 import { advanceBotInterview } from "@/lib/server/bot-interview";
+import {
+  completedComputerToolsAfterLastUser,
+  selectBotAgentInput,
+} from "@/lib/server/bot-agent-input";
+import { buildBotTextContext } from "@/lib/server/bot-agent-context";
 
 // Modelos pesados (nemotron-3-ultra, glm-5.1...) podem passar de 30s no
 // primeiro token; com 30 a função morria no meio do stream e a resposta
@@ -299,6 +307,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "Modelo não permitido." }, { status: 400 });
   }
   const currentMessages = Array.isArray(messages) ? messages : [];
+  const completedComputerTools = completedComputerToolsAfterLastUser(currentMessages);
   const session = await getNullainSession(req.headers).catch(() => null);
   const ownerId = session?.user.id;
   let botRuntime: ReturnType<typeof resolveBotRuntime> | null = null;
@@ -366,18 +375,11 @@ export async function POST(req: Request) {
     keepLatestUserImages: hasCurrentImage && isVisionChatModel(selectedModel),
   });
   const prunedMessages = pruneResult.messages;
-  // O transcript SQLite hidrata a interface, enquanto a memória Mastra fornece
-  // o contexto operacional. Para bots, enviar novamente todo o histórico
-  // hidratado duplicaria cada turno; somente o último user turn entra no run.
+  // O transcript SQLite hidrata a interface e a memória Mastra fornece o
+  // contexto. Primeiro passo: só o user atual. Continuação de client tool:
+  // somente a mensagem posterior com o resultado, sem repetir o user.
   const agentInputMessages = botRuntime
-    ? prunedMessages
-        .filter(
-          (message) =>
-            Boolean(message) &&
-            typeof message === "object" &&
-            (message as { role?: unknown }).role === "user",
-        )
-        .slice(-1)
+    ? selectBotAgentInput(prunedMessages, completedComputerTools.length > 0)
     : prunedMessages;
   logPruneStats(
     currentMessages,
@@ -398,6 +400,7 @@ export async function POST(req: Request) {
     capability: TranscriptRunCapability;
     assistantMessageId: string;
   } | null = null;
+  let botTextContext: Array<{ role: "user" | "assistant"; content: string }> = [];
   if (botRuntime) {
     const latest = [...currentMessages]
       .reverse()
@@ -428,6 +431,10 @@ export async function POST(req: Request) {
       botRuntime.bot.id,
       botRuntime.conversation.id,
       { idempotencyKey, parts: visibleParts },
+    );
+    botTextContext = buildBotTextContext(
+      listBotTranscript(ownerId!, botRuntime.bot.id, botRuntime.conversation.id, 20),
+      completedComputerTools.length > 0 ? undefined : userMessage.id,
     );
     const interview = botRuntime.bot.isSystem
       ? advanceBotInterview(
@@ -469,12 +476,16 @@ export async function POST(req: Request) {
       botRuntime.conversation.id,
       userMessage.id,
     );
-    const claim = claimTranscriptRun(
-      ownerId!,
-      botRuntime.bot.id,
-      botRuntime.conversation.id,
-      run.id,
-    );
+    let claim = claimTranscriptRun(ownerId!, botRuntime.bot.id, botRuntime.conversation.id, run.id);
+    if (!claim.claimed && claim.run.status === "running" && completedComputerTools.length > 0) {
+      claim = resumeTranscriptRun(
+        ownerId!,
+        botRuntime.bot.id,
+        botRuntime.conversation.id,
+        run.id,
+        completedComputerTools,
+      );
+    }
     if (!claim.claimed || !claim.capability) {
       if (claim.run.status === "completed") {
         const stored = getTranscriptMessage(
@@ -506,6 +517,22 @@ export async function POST(req: Request) {
       capability: claim.capability,
       assistantMessageId: run.assistantMessageId,
     };
+    if (completedComputerTools.length > 24) {
+      finishTranscriptRun(
+        ownerId!,
+        botRuntime.bot.id,
+        botRuntime.conversation.id,
+        persistentRun.capability,
+        "failed",
+        completedComputerTools,
+        "A execução foi interrompida porque excedeu o limite de ações consecutivas.",
+      );
+      persistentRun = null;
+      return Response.json(
+        { error: "A execução excedeu o limite de ações consecutivas do computador." },
+        { status: 422 },
+      );
+    }
   }
   const agent = mastra.getAgent("kernelAgent");
   const isReasoningModel = REASONING_MODELS.has(selectedModel);
@@ -545,7 +572,13 @@ export async function POST(req: Request) {
     resource: botRuntime
       ? `user-${ownerId}:bot-${botRuntime.bot.id}:conversation-${botRuntime.conversation.id}`
       : "default-resource",
+    ...(botRuntime ? { options: { lastMessages: false } } : {}),
   };
+  // O transcript SQLite é a fonte canônica do histórico visual. Para bots,
+  // carregamos somente seu texto validado como contexto e desativamos a janela
+  // de mensagens do Mastra: client tool invocations salvas pelo Mastra podem
+  // virar uma sequência OpenAI inválida no turno seguinte.
+  if (botRuntime && botTextContext.length > 0) streamOptions.context = botTextContext;
 
   // Skills: tool load_skill + índice no prompt SEMPRE ativos (progressive
   // disclosure — o índice custa ~40 tokens/skill; o corpo só entra quando o
@@ -568,6 +601,15 @@ export async function POST(req: Request) {
     !disabled.some((name) => name.toLowerCase() === "skill-creator") &&
     explicitlyRequestsSkillCreation(latestUserText(currentMessages));
   const botMayUseOptionalTools = !botRuntime || Boolean(botRuntime.bot.isSystem);
+  const useLocalComputer = Boolean(computer && botRuntime && isLocalComputerEnabled());
+  const localComputerTools =
+    useLocalComputer && botRuntime && ownerId
+      ? createLocalComputerTools({
+          ownerUserId: ownerId,
+          botId: botRuntime.bot.id,
+          conversationId: botRuntime.conversation.id,
+        })
+      : {};
   const composioTools =
     integrations && botMayUseOptionalTools ? await getComposioTools(sessionIntegrationKey) : {};
   const agentSkillsDocsTools = allowSkillCreation ? await getAgentSkillsDocsTools() : {};
@@ -582,6 +624,7 @@ export async function POST(req: Request) {
     ...(Object.keys(agentSkillsDocsTools).length > 0
       ? { agentSkillsDocs: agentSkillsDocsTools }
       : {}),
+    ...(Object.keys(localComputerTools).length > 0 ? { localComputer: localComputerTools } : {}),
   };
   // Tools CLIENT (executadas no browser): o servidor declara ao modelo e emite
   // a tool-call, mas NÃO executa — o frontend executa via proxy (cookie de
@@ -591,7 +634,7 @@ export async function POST(req: Request) {
   // AGORA GATEADO pelo toggle Computador: desligado, o modelo não vê a tool —
   // o computador só é usado quando o usuário liga. As instruções do computador
   // (buildInstructions) também só são injetadas quando ativo.
-  streamOptions.clientTools = computer && botMayUseOptionalTools ? openbotComputerClientTools : {};
+  streamOptions.clientTools = {};
   // O kernel é um supervisor: NÃO injetamos aqui as instruções de web search
   // (a pesquisa é delegada ao research-agent, que já tem suas regras próprias).
   // A persona vem do instructions do próprio kernelAgent (default). Mantemos
@@ -621,16 +664,20 @@ Fluxo: COMPOSIO_SEARCH_TOOLS descobre as tools → COMPOSIO_GET_TOOL_SCHEMAS peg
 - Modo VÍDEO: chame generate_video para animar uma imagem. A imagem de origem pode ser (a) a URL de um generate_image anterior, (b) uma URL pública, ou (c) a imagem anexada pelo usuário no composer — neste caso NÃO precisa passar o parâmetro image, o backend a usa automaticamente.
 Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/vídeo inline). Se a geração falhar (ex.: API key ausente), diga honestamente o que aconteceu e como resolver.`
     : "";
-  const computerInstructions = computer
+  const computerToolPrefix = "nullain";
+  const computerInstructions = useLocalComputer
     ? `O Computador está ativo e permite navegar e INTERAGIR com páginas reais.
-- Para agir em uma página, chame openbot_computer_snapshot primeiro. Use somente o ref e o snapshotId devolvidos; nunca invente valores.
-- openbot_computer_type preenche um campo (equivalente a fill). Use submit=true para enviar com Enter quando apropriado.
-- openbot_computer_click aciona botões, links, checkboxes e o botão de envio do formulário.
-- openbot_computer_key envia teclas; openbot_computer_scroll move a página.
-- Depois de qualquer ação que possa mudar a página, chame openbot_computer_read ou tire um novo snapshot e confirme o resultado antes de dizer que funcionou.
+- Para agir em uma página, chame ${computerToolPrefix}_computer_snapshot primeiro. Use somente o ref e o snapshotId devolvidos; nunca invente valores.
+- ${computerToolPrefix}_computer_type preenche um campo (equivalente a fill). Use submit=true para enviar com Enter quando apropriado.
+- ${computerToolPrefix}_computer_click aciona botões, links, checkboxes e o botão de envio do formulário.
+- ${computerToolPrefix}_computer_key envia teclas; ${computerToolPrefix}_computer_scroll move a página.
+- ${computerToolPrefix}_computer_tabs lista as abas abertas e ${computerToolPrefix}_computer_switch_tab troca a aba ativa quando um clique abrir outra página.
+- Depois de qualquer ação que possa mudar a página, chame ${computerToolPrefix}_computer_read ou tire um novo snapshot e confirme o resultado antes de dizer que funcionou.
 - Se o snapshot ficar obsoleto, tire outro. Não repita uma ação recusada pela política.
 - Nunca digite senhas, códigos de autenticação, dados de pagamento ou outros segredos. Para isso, peça que o usuário assuma o Computador.`
-    : "";
+    : computer
+      ? "O Computador local não está disponível nesta conversa. Não simule navegação nem afirme ter aberto uma página."
+      : "";
   const requestInstructions = [
     KERNEL_INSTRUCTIONS,
     skillsIndexPrompt(disabled, ownerId, grantedSkills ?? undefined),
@@ -677,14 +724,34 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
     // concatenamos na MESMA resposta do usuário via createUIMessageStream.
     type MastraToolResultChunk = {
       type: string;
-      payload?: { toolName?: string; args?: unknown; result?: unknown };
+      payload?: { toolName?: string; toolCallId?: string; args?: unknown; result?: unknown };
     };
     type MastraChunk = { type?: string; payload?: Record<string, unknown> };
-    const toolResultsForRetry: Array<{ toolName: string; args: unknown; result: unknown }> = [];
-    let mainTextLength = 0;
+    const toolResultsForRetry: Array<{
+      toolName: string;
+      toolCallId: string;
+      args: unknown;
+      result: unknown;
+    }> = [];
     let persistedVisibleText = "";
     let needsEmptyFallback = false;
+    let awaitsComputerResult = false;
     let fallbackStarted = false;
+    const persistedAssistantParts = () => {
+      const tools = new Map(completedComputerTools.map((tool) => [tool.toolCallId, tool]));
+      for (const tool of toolResultsForRetry) {
+        if (!/(?:openbot|nullain)_computer_/.test(tool.toolName)) continue;
+        tools.set(tool.toolCallId, {
+          type: "tool-call",
+          version: 1,
+          toolName: tool.toolName,
+          toolCallId: tool.toolCallId,
+          input: tool.args,
+          output: tool.result,
+        });
+      }
+      return [...tools.values(), { type: "text" as const, text: persistedVisibleText }];
+    };
     // Texto que JÁ foi entregue ao usuário neste stream (via toAISdkStream,
     // depois do monitored). O fallback só pode disparar se NADA foi entregue —
     // um retry em cima de conteúdo visível duplica frases na tela.
@@ -695,25 +762,24 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
         transform(chunk, controller) {
           const c = chunk as MastraChunk;
           const type = c?.type;
-          if (type === "text-delta") {
-            // Conta só texto real: alguns modelos emitem deltas de whitespace
-            // (medido no qwen3.5: 12 chars de espaços) antes de estourar os
-            // steps sem responder — isso NÃO é uma resposta.
-            const t = (c?.payload?.text as string | undefined) ?? "";
-            mainTextLength += t.trim().length;
-            persistedVisibleText += t;
-          }
           if (type === "tool-result") {
             const payload = c?.payload as MastraToolResultChunk["payload"] | undefined;
             if (payload) {
               toolResultsForRetry.push({
                 toolName: payload.toolName ?? "unknown",
+                toolCallId: payload.toolCallId ?? crypto.randomUUID(),
                 args: payload.args,
                 result: payload.result,
               });
             }
           }
-          if (type === "finish" && mainTextLength === 0 && toolResultsForRetry.length > 0) {
+          if (type === "tool-call") {
+            const payload = c?.payload as MastraToolResultChunk["payload"] | undefined;
+            if (/openbot_computer_/.test(payload?.toolName ?? "")) {
+              awaitsComputerResult = true;
+            }
+          }
+          if (type === "finish" && toolResultsForRetry.length > 0) {
             needsEmptyFallback = true;
           }
           controller.enqueue(chunk as never);
@@ -742,8 +808,15 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
               // comprimento que autoriza o fallback — não o do fluxo mastra,
               // que inclui texto consumido por transforms internos.
               const v = value as { type?: string; delta?: string } | undefined;
+              if (v?.type === "error") {
+                const errorText = (value as { errorText?: unknown }).errorText;
+                throw new Error(
+                  typeof errorText === "string" ? errorText : "A execução do modelo falhou.",
+                );
+              }
               if (v?.type === "text-delta" && typeof v.delta === "string") {
                 deliveredTextLength += v.delta.trim().length;
+                persistedVisibleText += v.delta;
               }
               writer.write(value as never);
             }
@@ -760,17 +833,31 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
             console.warn(
               `[/api/chat] empty-answer fallback: run ended without text after ${toolResultsForRetry.length} tool calls — retrying without tools`,
             );
-            const digest = toolResultsForRetry
-              .map((r, i) => {
-                let resultText = "";
-                try {
-                  resultText = JSON.stringify(r.result, null, 0) ?? "";
-                } catch {
-                  resultText = String(r.result);
-                }
-                return `[${i + 1}] ${r.toolName}(${JSON.stringify(r.args ?? {})}) => ${resultText.slice(0, 4000)}`;
-              })
-              .join("\n\n");
+            let digestBudget = 6_000;
+            const digestParts: string[] = [];
+            for (const [i, r] of toolResultsForRetry.entries()) {
+              if (digestBudget <= 0) break;
+              let resultText = "";
+              try {
+                resultText = JSON.stringify(r.result, null, 0) ?? "";
+              } catch {
+                resultText = String(r.result);
+              }
+              let argsText = "{}";
+              try {
+                argsText = (JSON.stringify(r.args ?? {}) ?? "{}").slice(0, 500);
+              } catch {
+                argsText = "[argumentos não serializáveis]";
+              }
+              const entry =
+                `[${i + 1}] ${r.toolName}(${argsText}) => ${resultText.slice(0, 1_200)}`.slice(
+                  0,
+                  digestBudget,
+                );
+              digestParts.push(entry);
+              digestBudget -= entry.length + 2;
+            }
+            const digest = digestParts.join("\n\n");
 
             writer.write({
               type: "text-start",
@@ -845,14 +932,14 @@ FALLBACK MODE: The tool step budget was exhausted. You already collected the con
               writer.write({ type: "text-end", id: "nullain-fallback" } as never);
             }
           }
-          if (persistentRun && botRuntime) {
+          if (persistentRun && botRuntime && !awaitsComputerResult) {
             finishTranscriptRun(
               ownerId!,
               botRuntime.bot.id,
               botRuntime.conversation.id,
               persistentRun.capability,
               "completed",
-              [{ type: "text", text: persistedVisibleText }],
+              persistedAssistantParts(),
             );
             persistentRun = null;
           }
@@ -864,7 +951,7 @@ FALLBACK MODE: The tool step budget was exhausted. You already collected the con
               botRuntime.conversation.id,
               persistentRun.capability,
               "failed",
-              [{ type: "text", text: persistedVisibleText }],
+              persistedAssistantParts(),
             );
             persistentRun = null;
           }

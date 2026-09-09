@@ -1,0 +1,27 @@
+services:
+  nullain-local-computer:
+    image: ghcr.io/steel-dev/steel-browser-api@sha256:f9a4648883dc06c402f5ffbec1c906bf9a803b5b737a1347de4e0aa0ca8d944a
+    container_name: nullain-local-computer
+    command: ["--no-nginx"]
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:3101:3000"
+      - "127.0.0.1:9224:9223"
+    shm_size: "2gb"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+      - /files:size=512m,mode=1777
+      - /root:size=128m,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 3g
+    cpus: 4
+    environment:
+      DOMAIN: localhost:3101
+      CDP_DOMAIN: localhost:9224
+      TZ: America/Sao_Paulo

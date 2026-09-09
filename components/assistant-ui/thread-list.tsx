@@ -33,6 +33,12 @@ import {
   serializePinnedThreadIds,
   updatePinnedThreadIds,
 } from "@/lib/thread-pins";
+import {
+  selectBotConversationForThread,
+  startNewBotConversation,
+} from "@/lib/bot-conversation-selection";
+
+const notifyBotConversationChanged = () => window.dispatchEvent(new Event("nullain-bot-changed"));
 
 type ThreadPinsContextValue = {
   isPinned: (threadId: string) => boolean;
@@ -102,7 +108,12 @@ export const ThreadList: FC = () => {
   return (
     <ThreadPinsProvider>
       <ThreadListPrimitive.Root className="flex flex-col">
-        <ThreadListPrimitive.New className="flex h-11 items-center gap-2.5 rounded-xl px-2.5 text-[15px] font-medium tracking-[-0.015em] text-foreground/80 transition-colors hover:bg-foreground/[0.045] hover:text-foreground data-active:bg-foreground/[0.065]">
+        <ThreadListPrimitive.New
+          onClick={() => {
+            if (startNewBotConversation(window.localStorage)) notifyBotConversationChanged();
+          }}
+          className="flex h-11 items-center gap-2.5 rounded-xl px-2.5 text-[15px] font-medium tracking-[-0.015em] text-foreground/80 transition-colors hover:bg-foreground/[0.045] hover:text-foreground data-active:bg-foreground/[0.065]"
+        >
           <span className="flex size-7 shrink-0 items-center justify-center">
             <PlusIcon className="size-[18px] stroke-[1.8]" />
           </span>
@@ -171,6 +182,10 @@ function ThreadListItem() {
       ) : (
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
+          onClick={() => {
+            if (selectBotConversationForThread(window.localStorage, threadId))
+              notifyBotConversationChanged();
+          }}
           className="flex h-full min-w-0 flex-1 items-center truncate rounded-xl px-2.5 text-start text-sm font-normal tracking-[-0.01em] text-foreground/72 outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 group-data-active:text-foreground focus-visible:ring-1 focus-visible:ring-ring/50"
         >
           <span className="min-w-0 flex-1 truncate">

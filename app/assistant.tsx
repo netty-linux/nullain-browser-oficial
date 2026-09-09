@@ -18,7 +18,7 @@ import {
   resolveImageMediaType,
   toMediaWireUrl,
 } from "@assistant-ui/core/internal";
-import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import { lastAssistantMessageIsCompleteWithToolCalls, type UIMessage } from "ai";
 import { usePathname } from "next/navigation";
 
 // Adapter de anexos: igual ao default (vercelAttachmentAdapter) mas comprime
@@ -89,13 +89,16 @@ import { SkillSelectionProvider } from "@/components/assistant-ui/skill-selector
 import { SkillCreatorToolUI } from "@/components/assistant-ui/skill-creator-tool-ui";
 import {
   loadBotTranscript,
+  mergeBotTranscriptMessages,
   readBotTranscript,
+  toBotTranscriptRepository,
   useBotThreadHistoryAdapter,
   useBotTranscriptTarget,
 } from "@/lib/bot-transcript-history";
 import { useEffect, useRef } from "react";
 import { BotCreatedDataUI, BotReviewDataUI } from "@/components/bots/bot-transcript-cards";
 import { ActiveBotProvider } from "@/components/bots/bot-avatar";
+import { selectBotConversationForThread } from "@/lib/bot-conversation-selection";
 
 function toNullainMessage(message: AppendMessage) {
   const parts = [
@@ -162,6 +165,11 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
   const transcriptTarget = useBotTranscriptTarget();
   const historyAdapter = useBotThreadHistoryAdapter(transcriptTarget);
   const runtime = useChatRuntime({
+    onThreadIdChange: (threadId) => {
+      if (!threadId) return;
+      if (selectBotConversationForThread(window.localStorage, threadId))
+        window.dispatchEvent(new Event("nullain-bot-changed"));
+    },
     toCreateMessage: toNullainMessage,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     adapters: {
@@ -241,16 +249,21 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
     }),
   });
   const loadedTarget = useRef<string | null>(null);
+  const hydratedMessages = useRef<UIMessage[]>([]);
   useEffect(() => {
     if (!transcriptTarget) return;
     const key = `${transcriptTarget.botId}:${transcriptTarget.conversationId}`;
     if (loadedTarget.current === key) return;
     loadedTarget.current = key;
+    hydratedMessages.current = [];
     let current = true;
     runtime.thread.cancelRun();
     void loadBotTranscript(transcriptTarget)
       .then((messages) => {
-        if (current) runtime.thread.importExternalState({ messages });
+        if (current) {
+          hydratedMessages.current = messages;
+          runtime.thread.importExternalState(toBotTranscriptRepository(messages));
+        }
       })
       .catch(console.error);
     return () => {
@@ -276,7 +289,11 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
         const page = await readBotTranscript(transcriptTarget, before);
         if (!current) return;
         rememberCursor(page);
-        runtime.thread.importExternalState({ messages: page.messages, append: true });
+        hydratedMessages.current = mergeBotTranscriptMessages(
+          hydratedMessages.current,
+          page.messages,
+        );
+        runtime.thread.importExternalState(toBotTranscriptRepository(hydratedMessages.current));
       } catch (error) {
         console.error(error);
       }
@@ -307,7 +324,11 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
         return;
       }
       if (sawActiveRun) {
-        runtime.thread.importExternalState({ messages: snapshot.messages });
+        hydratedMessages.current = mergeBotTranscriptMessages(
+          hydratedMessages.current,
+          snapshot.messages,
+        );
+        runtime.thread.importExternalState(toBotTranscriptRepository(hydratedMessages.current));
         sawActiveRun = false;
       }
     };
@@ -317,7 +338,11 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
           if (current) {
             rememberCursor(snapshot);
             dispatchActiveRun(snapshot.activeRun);
-            runtime.thread.importExternalState({ messages: snapshot.messages });
+            hydratedMessages.current = mergeBotTranscriptMessages(
+              hydratedMessages.current,
+              snapshot.messages,
+            );
+            runtime.thread.importExternalState(toBotTranscriptRepository(hydratedMessages.current));
           }
         })
         .catch(console.error);

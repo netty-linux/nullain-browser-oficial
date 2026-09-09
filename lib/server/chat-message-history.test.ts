@@ -81,4 +81,53 @@ describe("chat message image history", () => {
     expect(result.stats).toEqual({ droppedImageParts: 1, droppedEmptyAssistant: 1 });
     expect(result.messages).toHaveLength(1);
   });
+
+  it("limita quantidade de mensagens e orçamento textual enviado ao modelo", () => {
+    const messages = Array.from({ length: 60 }, (_, index) => ({
+      role: index % 2 ? "assistant" : "user",
+      parts: [{ type: "text", text: String(index).repeat(20_000) }],
+    }));
+    const result = pruneMessageHistory(messages, { keepLatestUserImages: false });
+    const textLength = result.messages.reduce<number>((total, raw) => {
+      const message = raw as { parts?: Array<{ type?: string; text?: string }> };
+      return (
+        total +
+        (message.parts ?? []).reduce(
+          (subtotal, part) => subtotal + (part.type === "text" ? (part.text?.length ?? 0) : 0),
+          0,
+        )
+      );
+    }, 0);
+    expect(result.messages).toHaveLength(40);
+    expect(textLength).toBeLessThanOrEqual(48_000);
+    expect(
+      result.messages.every((raw) =>
+        ((raw as { parts?: Array<{ text?: string }> }).parts ?? []).every(
+          (part) => (part.text?.length ?? 0) <= 12_000,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("compacta resultados grandes do computador no histórico legado", () => {
+    const result = pruneMessageHistory(
+      [
+        {
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-openbot_computer_read",
+              output: { url: "https://example.com", text: "x".repeat(10_000) },
+            },
+          ],
+        },
+      ],
+      { keepLatestUserImages: false },
+    );
+    const output = (
+      result.messages[0] as { parts: Array<{ output: { url: string; text: string } }> }
+    ).parts[0]!.output;
+    expect(output.url).toBe("https://example.com");
+    expect(output.text.length).toBeLessThan(900);
+  });
 });

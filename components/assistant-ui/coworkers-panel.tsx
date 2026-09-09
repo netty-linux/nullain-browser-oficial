@@ -3,51 +3,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCwIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { NullainLogo } from "@/components/nullain-logo";
+import { BotAvatar } from "@/components/bots/bot-avatar";
 
 /**
  * Painel "Coworkers" (Inversão FASE 5, parte 3).
  *
- * Lista os agentes/coworkers do OpenBot via proxy local `/api/ob/agents` (que
- * repassa ao OpenBot preservando o cookie de sessão). É o mesmo roster que a
- * UI do OpenBot mostra em /agents, agora dentro da casa Nullain.
- *
- * Só leitura nesta primeira versão: lista, mostra estado e permite abrir o
- * chat com o coworker (redireciona para o canal no OpenBot ou apenas exibe).
- * A criação/edição (endpoint, callback token, handoff) fica para uma próxima
- * iteração.
+ * Lista os bots persistentes da própria Nullain. Não consulta nem depende do
+ * roster legado do OpenBot.
  */
 
 type AgentProfile = {
   id: string;
   name: string;
-  title: string;
-  roleDescription: string;
-  avatarSeed: string;
-  visibility: "public" | "private";
-  endpoint: string | null;
-  builtIn: boolean;
-  protocol: "openbot" | "ag_ui" | "a2a";
-  hasAuth: boolean;
-  modelId: string | null;
-  computerAccess: boolean;
-  hidden: boolean;
-  mine: boolean;
+  description: string;
+  status: "ready" | "paused";
+  avatarColorToken: "ocean" | "violet" | "emerald" | "amber" | "rose" | "indigo";
 };
-
-/** A Nullain/Bloub coworker uses the mascot; others get an initials square. */
-function isBloub(a: { name?: string; avatarSeed?: string }): boolean {
-  return /^nullain/i.test(a.name ?? "") || /^nullain/i.test(a.avatarSeed ?? "");
-}
-
-function initialsOf(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
-    .join("");
-}
 
 export function CoworkersPanel() {
   const [agents, setAgents] = useState<AgentProfile[]>([]);
@@ -58,17 +29,17 @@ export function CoworkersPanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/ob/agents", { credentials: "include" });
+      const res = await fetch("/api/bots", { credentials: "include", cache: "no-store" });
       if (!res.ok) {
-        setError(`Não foi possível carregar os coworkers (${res.status}).`);
+        setError(`Não foi possível carregar os bots (${res.status}).`);
         setAgents([]);
         return;
       }
-      const data = (await res.json()) as AgentProfile[] | { agents?: AgentProfile[] };
-      const list = Array.isArray(data) ? data : data?.agents;
+      const data = (await res.json()) as { bots?: AgentProfile[] };
+      const list = data?.bots;
       setAgents(Array.isArray(list) ? list : []);
     } catch {
-      setError("Não foi possível alcançar o OpenBot para listar os coworkers.");
+      setError("Não foi possível carregar os bots da Nullain.");
       setAgents([]);
     } finally {
       setLoading(false);
@@ -79,9 +50,7 @@ export function CoworkersPanel() {
     void load();
   }, [load]);
 
-  // Só a Nullain aparece no painel; os demais coworkers do OpenBot ficam
-  // ocultos aqui (a identidade principal da casa é a Nullain).
-  const visible = agents.filter((a) => !a.hidden && isBloub(a));
+  const visible = agents;
 
   return (
     <div className="flex h-full flex-col gap-1 px-1">
@@ -114,11 +83,7 @@ export function CoworkersPanel() {
               className="flex items-start gap-2.5 rounded-lg p-2 hover:bg-foreground/5"
             >
               <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-semibold">
-                {isBloub(agent) ? (
-                  <NullainLogo className="size-8" decorative />
-                ) : (
-                  <span>{initialsOf(agent.name)}</span>
-                )}
+                <BotAvatar color={agent.avatarColorToken} name={agent.name} className="size-8" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
@@ -127,9 +92,8 @@ export function CoworkersPanel() {
                   </span>
                 </div>
                 <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                  {isBloub(agent)
-                    ? "Nullain Agent / Agente Principal"
-                    : agent.roleDescription || agent.title}
+                  {agent.description}
+                  {agent.status === "paused" ? " · pausado" : ""}
                 </p>
               </div>
             </div>

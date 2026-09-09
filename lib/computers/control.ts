@@ -1,4 +1,4 @@
-import { tryClient } from "./client";
+import { computerUrl, tryClient } from "./client";
 
 /**
  * Dar/retomar o volante do computador de um Bot.
@@ -19,26 +19,35 @@ export type ControlState = {
   secretWanted?: string;
 };
 
+type ControlOptions = {
+  /** Proxy do computador. Default: legado `/api/computers`. */
+  basePath?: string;
+};
+
 async function callControl(
   computerId: string,
   path: string,
   method?: string,
+  options: ControlOptions = {},
 ): Promise<ControlState | null> {
-  const response = await tryClient(`/api/computers/${computerId}${path}`, method ? { method } : {});
+  const response = await tryClient(
+    computerUrl(computerId, path, options.basePath),
+    method ? { method } : {},
+  );
   if (!response.ok) return null;
   return (await response.json()) as ControlState;
 }
 
-export function readControl(computerId: string) {
-  return callControl(computerId, "/control");
+export function readControl(computerId: string, options: ControlOptions = {}) {
+  return callControl(computerId, "/control", undefined, options);
 }
 
-export function takeControl(computerId: string) {
-  return callControl(computerId, "/control/take", "POST");
+export function takeControl(computerId: string, options: ControlOptions = {}) {
+  return callControl(computerId, "/control/take", "POST", options);
 }
 
-export function releaseControl(computerId: string) {
-  return callControl(computerId, "/control/release", "POST");
+export function releaseControl(computerId: string, options: ControlOptions = {}) {
+  return callControl(computerId, "/control/release", "POST", options);
 }
 
 /**
@@ -50,9 +59,10 @@ export function releaseControl(computerId: string) {
 export async function supplySecret(
   computerId: string,
   text: string,
+  options: ControlOptions = {},
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const response = await tryClient(`/api/computers/${computerId}/human/secret`, {
+    const response = await tryClient(computerUrl(computerId, "/human/secret", options.basePath), {
       method: "POST",
       body: { text },
     });
@@ -79,10 +89,11 @@ export function sendHumanInput(
   computerId: string,
   kind: "click" | "type" | "key" | "scroll",
   body: Record<string, unknown>,
+  options: ControlOptions = {},
 ): void {
   inputQueue = inputQueue
     .then(() =>
-      tryClient(`/api/computers/${computerId}/human/${kind}`, {
+      tryClient(computerUrl(computerId, `/human/${kind}`, options.basePath), {
         method: "POST",
         body,
       }),

@@ -15,6 +15,7 @@ import { ComposerPrimitive } from "@assistant-ui/react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import { useBotComputerTarget } from "@/components/bots/use-bot-computer";
 import {
   loadGeneration,
   loadGenerationMode,
@@ -40,10 +41,46 @@ export const ComposerComputerToggle: FC = () => {
   // Estado vem do ComposerComputerContext (ThreadRoot) — o mesmo que o aviso de
   // imagem+computador e o guard de envio leem. Sincronia garantida entre os três.
   const { computer: on, setComputer } = useComposerComputer();
+  const { ready: targetReady, target } = useBotComputerTarget();
+  const [runtimeState, setRuntimeState] = useState<"idle" | "starting" | "ready" | "error">("idle");
+
+  useEffect(() => {
+    if (!on) {
+      setRuntimeState("idle");
+      return;
+    }
+    if (!targetReady) {
+      setRuntimeState("starting");
+      return;
+    }
+    const controller = new AbortController();
+    setRuntimeState("starting");
+    fetch(`${target.basePath}/status`, { credentials: "include", signal: controller.signal })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => null)) as { ready?: boolean } | null;
+        if (!controller.signal.aborted)
+          setRuntimeState(response.ok && body?.ready ? "ready" : "error");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setRuntimeState("error");
+      });
+    return () => controller.abort();
+  }, [on, targetReady, target.basePath]);
+
+  const statusLabel =
+    on && !targetReady
+      ? "será iniciado no primeiro envio"
+      : runtimeState === "starting"
+        ? "iniciando"
+        : runtimeState === "error"
+          ? "indisponível"
+          : on
+            ? "ativo"
+            : "desativado";
 
   return (
     <TooltipIconButton
-      tooltip={on ? "Computador: ON" : "Computador: OFF"}
+      tooltip={`Computador: ${statusLabel}`}
       side="bottom"
       variant="ghost"
       size="icon"
@@ -56,7 +93,8 @@ export const ComposerComputerToggle: FC = () => {
           ? "text-sky-600 dark:text-sky-400 bg-sky-500/10 hover:bg-sky-500/15"
           : "text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:hover:bg-muted-foreground/30",
       )}
-      aria-label="Toggle Computador"
+      aria-label={`Computador ${statusLabel}`}
+      data-runtime-state={runtimeState}
       aria-pressed={on}
       onClick={() => setComputer((v) => !v)}
     >
@@ -64,6 +102,15 @@ export const ComposerComputerToggle: FC = () => {
       <span className="aui-composer-computer-label text-[13px] font-medium leading-none">
         Computador
       </span>
+      {on && runtimeState !== "ready" ? (
+        <span
+          className={cn(
+            "size-1.5 rounded-full",
+            runtimeState === "error" ? "bg-destructive" : "animate-pulse bg-current",
+          )}
+          aria-hidden="true"
+        />
+      ) : null}
     </TooltipIconButton>
   );
 };
