@@ -22,6 +22,8 @@ export type ControlState = {
 type ControlOptions = {
   /** Proxy do computador. Default: legado `/api/computers`. */
   basePath?: string;
+  /** AbortSignal do chamador (o polling passa timeout próprio). */
+  signal?: AbortSignal;
 };
 
 async function callControl(
@@ -30,12 +32,18 @@ async function callControl(
   method?: string,
   options: ControlOptions = {},
 ): Promise<ControlState | null> {
-  const response = await tryClient(
-    computerUrl(computerId, path, options.basePath),
-    method ? { method } : {},
-  );
-  if (!response.ok) return null;
-  return (await response.json()) as ControlState;
+  try {
+    const response = await tryClient(computerUrl(computerId, path, options.basePath), {
+      ...(method ? { method } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as ControlState;
+  } catch {
+    // Polling de controle é best-effort. Timeout, troca de conversa ou runtime
+    // local reiniciando não podem virar uma rejeição não tratada no React.
+    return null;
+  }
 }
 
 export function readControl(computerId: string, options: ControlOptions = {}) {

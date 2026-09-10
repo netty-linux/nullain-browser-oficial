@@ -7,14 +7,18 @@ import { cn } from "@/lib/utils";
 
 /**
  * Chip visual exibido no lugar do tool-call quando o agente carrega uma skill
- * (load_skill). Mostra o nome da skill num chip discreto com ícone de sparkles,
- * seguindo o padrão visual do ToolFallback ghost.
+ * (tool nativa `skill`, legado `load_skill`). Mostra o nome da skill num chip
+ * discreto com ícone de sparkles, seguindo o padrão visual do ToolFallback ghost.
  */
 const SkillChipRenderer: ToolCallMessagePartComponent = ({ argsText, status }) => {
   let skillName = "";
   try {
-    const parsed = JSON.parse(argsText ?? "{}") as { name?: string };
-    skillName = parsed.name ?? "";
+    const parsed = JSON.parse(argsText ?? "{}") as {
+      name?: string;
+      skillName?: string;
+      skill?: string;
+    };
+    skillName = parsed.name ?? parsed.skillName ?? parsed.skill ?? "";
   } catch {
     skillName = "";
   }
@@ -34,10 +38,14 @@ const SkillChipRenderer: ToolCallMessagePartComponent = ({ argsText, status }) =
 };
 
 /**
- * Registra o renderer para tool-calls de load_skill enquanto montado.
- * Renderizado uma vez por AssistantMessage.
+ * Registra o renderer para tool-calls de skill (`skill` nativa + legado
+ * `load_skill`) enquanto montado. Renderizado uma vez por AssistantMessage.
  */
 export const SkillChip: FC = () => {
+  useAssistantToolUI({
+    toolName: "skill",
+    render: SkillChipRenderer,
+  });
   useAssistantToolUI({
     toolName: "load_skill",
     render: SkillChipRenderer,

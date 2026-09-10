@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { getNullainDatabase } from "./nullain-db";
-import { CHAT_MODEL_IDS, DEFAULT_CHAT_MODEL } from "@/lib/model-catalog";
+import { CHAT_MODEL_IDS, DEFAULT_CHAT_MODEL, resolveModelAlias } from "@/lib/model-catalog";
 import { loadSkills } from "@/src/mastra/skills/loader";
 
 export const BOT_AVATAR_COLORS = ["ocean", "violet", "emerald", "amber", "rose", "indigo"] as const;
@@ -113,8 +113,11 @@ function parseStatus(value: unknown): "ready" | "paused" {
 }
 
 function parseModel(value: unknown) {
-  if (typeof value !== "string" || !MODEL_IDS.has(value)) throw new Error("Modelo não permitido.");
-  return value;
+  // Migra IDs legados renomeados no registry (bots salvos antes da renomeação).
+  const resolved = typeof value === "string" ? resolveModelAlias(value) : value;
+  if (typeof resolved !== "string" || !MODEL_IDS.has(resolved))
+    throw new Error("Modelo não permitido.");
+  return resolved;
 }
 
 function slugify(value: string) {

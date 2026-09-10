@@ -29,7 +29,11 @@ export async function readScreenshot(
 ): Promise<{ frame?: Screenshot; error?: string }> {
   const unavailable = "The screen is not available right now.";
   try {
-    const response = await tryClient(computerUrl(computerId, "/screenshot", options.basePath));
+    // Timeout próprio: sem ele, um screenshot travado no CDP pendura o tick
+    // do polling para sempre (shot null + erro null = "Waiting..." eterno).
+    const response = await tryClient(computerUrl(computerId, "/screenshot", options.basePath), {
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as {
         error?: string;

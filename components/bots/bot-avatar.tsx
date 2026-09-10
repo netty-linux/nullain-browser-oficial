@@ -44,17 +44,40 @@ export function ActiveBotProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let current = true;
     const load = () =>
-      fetch("/api/bots")
+      fetch("/api/bots", { credentials: "include" })
         .then((response) => (response.ok ? response.json() : null))
         .then((body) => {
           if (!current) return;
           const bots = (body?.bots ?? []) as ActiveBot[];
           const selected = localStorage.getItem("nullain-active-bot-id");
-          setBot(
-            bots.find((item) => item.id === selected) ?? bots.find((item) => item.isSystem) ?? null,
-          );
+          const resolved =
+            bots.find((item) => item.id === selected) ??
+            bots.find((item) => item.isSystem) ??
+            (bots.length > 0
+              ? bots[0]
+              : {
+                  id: "nullain-default",
+                  name: "Nullain",
+                  avatarColorToken: "ocean" as const,
+                  isSystem: 1 as const,
+                });
+          if (resolved && !selected && resolved.id !== "nullain-default") {
+            localStorage.setItem("nullain-active-bot-id", resolved.id);
+            if (!localStorage.getItem("nullain-active-bot-conversation-id")) {
+              localStorage.setItem("nullain-active-bot-conversation-id", crypto.randomUUID());
+            }
+          }
+          setBot(resolved);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!current) return;
+          setBot({
+            id: "nullain-default",
+            name: "Nullain",
+            avatarColorToken: "ocean",
+            isSystem: 1,
+          });
+        });
     void load();
     window.addEventListener("nullain-bot-changed", load);
     return () => {

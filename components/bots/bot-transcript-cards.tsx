@@ -205,7 +205,7 @@ function BotReviewCard({ data }: DataMessagePartProps<ReviewData>) {
               value={skillNames}
               onChange={(event) => setSkillNames(event.target.value)}
               className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
-              placeholder="ex.: commit-writer"
+              placeholder="ex.: skill-creator"
             />
           </label>
           {catalog.length > 0 && (

@@ -1,6 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
-import { BotAvatar } from "./bot-avatar";
+import {
+  MoreHorizontalIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
+  PlusIcon,
+  Trash2Icon,
+} from "lucide-react";
+import { BotAvatar, useActiveBotIdentity } from "./bot-avatar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 import { CHAT_MODEL_IDS } from "@/lib/model-catalog";
 
 type Bot = {
@@ -32,18 +42,24 @@ export function BotLauncher() {
     [editCatalog, setEditCatalog] = useState<Array<{ name: string; description: string }>>([]),
     [editBusy, setEditBusy] = useState(false),
     [editError, setEditError] = useState("");
+  // Identidade via contexto (hidratado pós-mount) — ler localStorage aqui
+  // durante a renderização divergiria do SSR e quebraria a hidratação.
+  const activeBot = useActiveBotIdentity();
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const load = () =>
-    fetch("/api/bots")
+    fetch("/api/bots", { credentials: "include", cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const loaded = (data?.bots ?? []) as Bot[];
-        setBots(loaded);
+        const loadedBots = (data?.bots ?? []) as Bot[];
+        setBots(loadedBots);
         if (!localStorage.getItem("nullain-active-bot-id")) {
-          const system = loaded.find((bot) => bot.isSystem);
+          const system = loadedBots.find((bot) => bot.isSystem);
           if (system) choose(system);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   useEffect(() => {
     load();
   }, []);
@@ -229,76 +245,136 @@ export function BotLauncher() {
     }
   };
   return (
-    <div className="mb-3 space-y-1 px-1">
-      <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
-        <span>SEUS BOTS</span>
-        <button onClick={() => setOpen(true)} className="text-foreground hover:underline">
+    <div className="mb-3 space-y-0.5 px-1">
+      <div className="flex items-center justify-between px-2 pb-1">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          Seus bots
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-label="Criar bot"
+          className="flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <PlusIcon className="size-3.5" />
           Criar
         </button>
       </div>
-      {manageError && <p className="px-1 text-xs text-destructive">{manageError}</p>}
+      {manageError && <p className="px-2 py-1 text-xs text-destructive">{manageError}</p>}
+      {loaded && bots.length === 0 && (
+        <p className="px-2 py-2 text-xs leading-relaxed text-muted-foreground">
+          Nenhum bot ainda. Crie o primeiro para começar.
+        </p>
+      )}
       {bots.map((bot) => {
-        const active =
-          typeof window !== "undefined" && localStorage.getItem("nullain-active-bot-id") === bot.id;
+        const active = activeBot?.id === bot.id;
+        const paused = bot.status === "paused";
+        const busy = manageBusy && managingId === bot.id;
+        const menuOpen = menuFor === bot.id;
         return (
           <div
             key={bot.id}
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-foreground/5"
+            className={cn(
+              "group flex w-full items-center gap-1 rounded-2xl transition-colors",
+              active ? "bg-foreground/[0.06]" : "hover:bg-foreground/[0.04]",
+            )}
           >
             <button
+              type="button"
               onClick={() => choose(bot)}
-              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              aria-label={`Conversar com ${bot.name}`}
+              aria-current={active}
+              title={`Conversar com ${bot.name}`}
+              className="flex min-w-0 flex-1 items-center gap-3 rounded-2xl px-2 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
             >
-              <BotAvatar color={bot.avatarColorToken} name={bot.name} className="size-6" />
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-medium">
-                  {bot.name}
-                  {bot.status === "paused" ? " (pausado)" : ""}
+              <BotAvatar
+                color={bot.avatarColorToken}
+                name={bot.name}
+                className="size-10 rounded-2xl"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center justify-between gap-2">
+                  <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-foreground">
+                    {bot.name}
+                  </span>
+                  {paused ? (
+                    <span className="shrink-0 text-xs text-muted-foreground/70">Pausado</span>
+                  ) : active ? (
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-emerald-500"
+                      title="Bot ativo"
+                      aria-label="Bot ativo"
+                    />
+                  ) : null}
                 </span>
-                <span className="block truncate text-xs text-muted-foreground">
+                <span className="block truncate text-[13px] leading-snug text-muted-foreground">
                   {bot.description}
                 </span>
               </span>
             </button>
             {!bot.isSystem && (
-              <span className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  disabled={manageBusy && managingId === bot.id}
-                  onClick={() => void toggleStatus(bot)}
-                  title={bot.status === "paused" ? "Retomar bot" : "Pausar bot"}
-                  aria-label={
-                    bot.status === "paused" ? `Retomar ${bot.name}` : `Pausar ${bot.name}`
+              <Popover open={menuOpen} onOpenChange={(next) => setMenuFor(next ? bot.id : null)}>
+                <PopoverTrigger
+                  render={
+                    <button
+                      type="button"
+                      aria-label={`Opções de ${bot.name}`}
+                      title="Opções"
+                      className={cn(
+                        "mr-1.5 flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-all hover:bg-foreground/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40",
+                        menuOpen
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100",
+                      )}
+                    />
                   }
-                  aria-pressed={active}
-                  className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground disabled:opacity-50"
                 >
-                  {manageBusy && managingId === bot.id
-                    ? "…"
-                    : bot.status === "paused"
-                      ? "Retomar"
-                      : "Pausar"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void openEdit(bot)}
-                  title={`Configurar ${bot.name}`}
-                  aria-label={`Configurar ${bot.name}`}
-                  className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                >
-                  Configurar
-                </button>
-                <button
-                  type="button"
-                  disabled={manageBusy && managingId === bot.id}
-                  onClick={() => void removeBot(bot)}
-                  title={`Excluir ${bot.name}`}
-                  aria-label={`Excluir ${bot.name}`}
-                  className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
-                >
-                  Excluir
-                </button>
-              </span>
+                  <MoreHorizontalIcon className="size-4" />
+                </PopoverTrigger>
+                <PopoverContent align="end" sideOffset={4} className="w-44 gap-0.5 p-1">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setMenuFor(null);
+                      void toggleStatus(bot);
+                    }}
+                    className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-foreground outline-none transition-colors hover:bg-foreground/5 focus-visible:bg-foreground/5 disabled:opacity-50"
+                  >
+                    {paused ? (
+                      <PlayIcon className="size-4 shrink-0 text-muted-foreground" />
+                    ) : (
+                      <PauseIcon className="size-4 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className="flex-1 text-left">
+                      {busy ? "Aguarde…" : paused ? "Retomar" : "Pausar"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuFor(null);
+                      void openEdit(bot);
+                    }}
+                    className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm text-foreground outline-none transition-colors hover:bg-foreground/5 focus-visible:bg-foreground/5"
+                  >
+                    <PencilIcon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="flex-1 text-left">Configurar</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setMenuFor(null);
+                      void removeBot(bot);
+                    }}
+                    className="text-destructive flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-sm outline-none transition-colors hover:bg-destructive/10 focus-visible:bg-destructive/10 disabled:opacity-50"
+                  >
+                    <Trash2Icon className="size-4 shrink-0" />
+                    <span className="flex-1 text-left">Excluir</span>
+                  </button>
+                </PopoverContent>
+              </Popover>
             )}
           </div>
         );
@@ -309,27 +385,37 @@ export function BotLauncher() {
           aria-modal="true"
           className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
         >
-          <div className="w-full max-w-md rounded-xl border border-border bg-background p-5 shadow-xl">
-            <h2 className="text-lg font-semibold">Criar bot</h2>
+          <div className="w-full max-w-md rounded-2xl border border-border bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold tracking-tight">Criar bot</h2>
             <p className="mt-1 text-sm text-muted-foreground">
               Em linguagem natural, descreva o objetivo permanente dele.
             </p>
+            <label
+              htmlFor="nullain-new-bot-objective"
+              className="mt-4 block text-[13px] font-medium text-foreground/80"
+            >
+              Objetivo
+            </label>
             <textarea
+              id="nullain-new-bot-objective"
               autoFocus
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
-              className="mt-4 min-h-28 w-full rounded-lg border bg-transparent p-3"
+              className="mt-1.5 min-h-28 w-full rounded-xl border border-border bg-transparent p-3 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
               placeholder="Ex.: acompanhar conteúdos e planejar publicações."
             />
             {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
-            <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setOpen(false)} className="rounded-lg px-3 py-2">
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setOpen(false)}
+                className="h-9 rounded-full px-4 text-sm font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
                 Cancelar
               </button>
               <button
                 disabled={busy || !objective.trim()}
                 onClick={create}
-                className="rounded-lg bg-foreground px-3 py-2 text-background disabled:opacity-50"
+                className="h-9 rounded-full bg-foreground px-4 text-sm font-medium text-background outline-none transition-all hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50"
               >
                 {busy ? "Criando…" : "Revisar e criar"}
               </button>
@@ -344,42 +430,42 @@ export function BotLauncher() {
           aria-label="Configurar bot"
           className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
         >
-          <div className="w-full max-w-md rounded-xl border border-border bg-background p-5 shadow-xl">
-            <h2 className="text-lg font-semibold">Configurar bot</h2>
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold tracking-tight">Configurar bot</h2>
             {editBusy && !editName ? (
               <p className="mt-3 text-sm text-muted-foreground">Carregando…</p>
             ) : (
               <>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Nome
                   <input
                     value={editName}
                     onChange={(event) => setEditName(event.target.value)}
-                    className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Resumo
                   <textarea
                     value={editDescription}
                     onChange={(event) => setEditDescription(event.target.value)}
-                    className="mt-1 min-h-16 w-full rounded-lg border bg-transparent px-3 py-2"
+                    className="mt-1.5 min-h-16 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Instruções
                   <textarea
                     value={editInstructions}
                     onChange={(event) => setEditInstructions(event.target.value)}
-                    className="mt-1 min-h-20 w-full rounded-lg border bg-transparent px-3 py-2"
+                    className="mt-1.5 min-h-20 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Modelo
                   <select
                     value={editModel}
                     onChange={(event) => setEditModel(event.target.value)}
-                    className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   >
                     {CHAT_MODEL_IDS.map((id) => (
                       <option key={id} value={id}>
@@ -388,12 +474,12 @@ export function BotLauncher() {
                     ))}
                   </select>
                 </label>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Cor de identificação
                   <select
                     value={editColor}
                     onChange={(event) => setEditColor(event.target.value)}
-                    className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   >
                     {["ocean", "violet", "emerald", "amber", "rose", "indigo"].map((color) => (
                       <option key={color} value={color}>
@@ -402,13 +488,13 @@ export function BotLauncher() {
                     ))}
                   </select>
                 </label>
-                <label className="mt-2 block text-sm">
+                <label className="mt-3 block text-[13px] font-medium text-foreground/80">
                   Skills (nomes separados por vírgula)
                   <input
                     value={editSkills}
                     onChange={(event) => setEditSkills(event.target.value)}
-                    className="mt-1 w-full rounded-lg border bg-transparent px-3 py-2"
-                    placeholder="ex.: commit-writer"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                    placeholder="ex.: skill-creator"
                   />
                 </label>
                 {editCatalog.length > 0 && (
@@ -419,14 +505,17 @@ export function BotLauncher() {
               </>
             )}
             {editError && <p className="mt-2 text-sm text-destructive">{editError}</p>}
-            <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setEditingBotId(null)} className="rounded-lg px-3 py-2">
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setEditingBotId(null)}
+                className="h-9 rounded-full px-4 text-sm font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
                 Fechar
               </button>
               <button
                 disabled={editBusy || !editName.trim()}
                 onClick={() => void saveEdit()}
-                className="rounded-lg bg-foreground px-3 py-2 text-background disabled:opacity-50"
+                className="h-9 rounded-full bg-foreground px-4 text-sm font-medium text-background outline-none transition-all hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50"
               >
                 {editBusy ? "Salvando…" : "Salvar"}
               </button>

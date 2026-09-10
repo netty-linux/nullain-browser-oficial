@@ -30,6 +30,7 @@ describe("Nullain app database migrations", () => {
       { name: "003_bot_runtime.sql" },
       { name: "004_bot_transcript.sql" },
       { name: "005_bot_openbot_link.sql" },
+      { name: "006_site_resolution_cache.sql" },
     ]);
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
     database.close();

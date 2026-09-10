@@ -1,22 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useAssistantToolUI, type ToolCallMessagePartProps } from "@assistant-ui/react";
-import { ComputerView } from "./computer-view";
 import { useBotComputerTarget } from "@/components/bots/use-bot-computer";
 import { computerUrl } from "@/lib/computers/client";
 
 const EXECUTED_TOOL_CALLS = new Set<string>();
 const MAX_EXECUTED_TOOL_CALLS = 500;
-const LATEST_LOCAL_NAVIGATION = new Map<string, string>();
-const LOCAL_NAVIGATION_LISTENERS = new Set<() => void>();
-
-function publishLatestLocalNavigation(scope: string, toolCallId: string) {
-  if (LATEST_LOCAL_NAVIGATION.get(scope) === toolCallId) return;
-  LATEST_LOCAL_NAVIGATION.set(scope, toolCallId);
-  for (const listener of LOCAL_NAVIGATION_LISTENERS) listener();
-}
-
 function claimToolExecution(toolCallId: string | undefined): boolean {
   if (!toolCallId) return true;
   if (EXECUTED_TOOL_CALLS.has(toolCallId)) return false;
@@ -42,8 +32,8 @@ function releaseToolExecution(toolCallId: string | undefined) {
  * As `openbot_computer_*` são CLIENT TOOLS do Mastra: o servidor as declara ao
  * modelo e emite a tool-call, mas NÃO as executa. Este componente executa
  * navegação, snapshot, leitura e ações no browser pelo proxy local do
- * computador e devolve o resultado ao modelo via `addResult`. A navegação
- * também renderiza o ComputerView inline.
+ * computador e devolve o resultado ao modelo via `addResult`. A tela viva
+ * fica exclusivamente no painel lateral para manter a conversa legível.
  *
  * Stage 3A: o target (id + proxy) é resolvido pelo bot ativo — bot não-system
  * com vínculo usa `/api/bots/:botId/computer`, cujo servidor resolve o agente a
@@ -286,60 +276,9 @@ export function ComputerToolUI() {
   return null;
 }
 
-function resultPage(result: unknown): { url?: string; title?: string } | undefined {
-  try {
-    const parsed =
-      typeof result === "string"
-        ? JSON.parse(result)
-        : (result as Record<string, unknown> | undefined);
-    if (parsed && typeof parsed.url === "string") {
-      return {
-        url: parsed.url,
-        ...(typeof parsed.title === "string" ? { title: parsed.title } : {}),
-      };
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-function LocalComputerNavigateRenderer({
-  toolCallId,
-  result,
-}: ToolCallMessagePartProps<{ url?: string }, unknown>) {
-  const { ready, target } = useBotComputerTarget();
-  const finished = result !== undefined;
-  const page = resultPage(result);
-  const pageUrl = page?.url;
-  const [, update] = useState(0);
-  useEffect(() => {
-    const listener = () => update((value) => value + 1);
-    LOCAL_NAVIGATION_LISTENERS.add(listener);
-    if (finished && pageUrl && toolCallId) {
-      publishLatestLocalNavigation(target.basePath, toolCallId);
-    }
-    return () => {
-      LOCAL_NAVIGATION_LISTENERS.delete(listener);
-    };
-  }, [finished, pageUrl, target.basePath, toolCallId]);
-  if (!ready || (finished && !page)) return null;
-  if (finished && toolCallId && LATEST_LOCAL_NAVIGATION.get(target.basePath) !== toolCallId) {
-    return null;
-  }
-  return (
-    <div className="my-2">
-      <ComputerView
-        computerId={target.computerId}
-        basePath={target.basePath}
-        name={target.name}
-        active={!finished}
-        finished={finished}
-        {...(page ? { page } : {})}
-        {...(toolCallId ? { toolCallId } : {})}
-      />
-    </div>
-  );
+function LocalComputerNavigateRenderer(props: ToolCallMessagePartProps<{ url?: string }, unknown>) {
+  void props;
+  return null;
 }
 
 function ComputerNavigateRenderer({
@@ -348,27 +287,7 @@ function ComputerNavigateRenderer({
   result,
   addResult,
 }: ToolCallMessagePartProps<{ url?: string }, unknown>) {
-  const { target } = useBotComputerTarget();
-  const finished = result !== undefined;
-  const page = resultPage(result);
-
-  // Turno encerrado sem página conhecida (frame recusado, erro de rede,
-  // result sem url): um tile grande de "did not open a page" é ruído — o
-  // texto da resposta já conta o que aconteceu. Renderiza nada.
-  if (finished && !page) return null;
-
   return (
-    <div className="my-2">
-      <NavigateExecutor args={args} addResult={addResult} toolCallId={toolCallId} result={result} />
-      <ComputerView
-        computerId={target.computerId}
-        basePath={target.basePath}
-        name={target.name}
-        active={!finished}
-        finished={finished}
-        {...(page ? { page } : {})}
-        {...(toolCallId ? { toolCallId } : {})}
-      />
-    </div>
+    <NavigateExecutor args={args} addResult={addResult} toolCallId={toolCallId} result={result} />
   );
 }

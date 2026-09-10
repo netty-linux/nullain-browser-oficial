@@ -1,5 +1,6 @@
 import { deleteBot, requireBot, updateBotProfile } from "@/lib/server/bot-runtime-repository";
 import { listGrantedSkillNames } from "@/lib/server/bot-runtime-repository";
+import { destroyBotComputers } from "@/lib/server/local-computer";
 import { requireNullainSession } from "@/lib/server/nullain-auth";
 import { isInvalidCookieMutationOrigin } from "@/lib/server/request-security";
 
@@ -54,6 +55,9 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     const { id } = await params;
     const body = (await request.json().catch(() => ({}))) as { confirmName?: unknown };
     deleteBot(session.user.id, id, body);
+    // O computador de cada bot é isolado por escopo — ao excluir, destrói as
+    // sessões vivas (cookies/páginas) para nada vazar entre bots.
+    await destroyBotComputers(session.user.id, id).catch(() => undefined);
     return new Response(null, { status: 204 });
   } catch (error) {
     return failure(error);

@@ -108,7 +108,7 @@ export const generateImageTool = createTool({
         ok: false,
         error:
           "WAVESPEED_API_KEY não configurada. Adicione a key no .env.local (https://wavespeed.ai) e reinicie o dev server.",
-      } as never;
+      };
     }
     try {
       const id = await submitPrediction(FLUX_ENDPOINT, {
@@ -121,11 +121,11 @@ export const generateImageTool = createTool({
         return {
           ok: false,
           error: `Geração de imagem falhou: ${result.error ?? result.status}`,
-        } as never;
+        };
       }
       return { ok: true, urls: stringifyOutputs(result.outputs) };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) } as never;
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   },
 });
@@ -166,7 +166,7 @@ function createGenerateVideoTool(attachedImageDataUrl: string | null) {
           ok: false,
           error:
             "WAVESPEED_API_KEY não configurada. Adicione a key no .env.local (https://wavespeed.ai) e reinicie o dev server.",
-        } as never;
+        };
       }
       try {
         // A imagem de origem pode vir de 3 lugares:
@@ -181,7 +181,7 @@ function createGenerateVideoTool(attachedImageDataUrl: string | null) {
             ok: false,
             error:
               "Nenhuma imagem de origem fornecida. Anexe uma imagem no composer ou forneça a URL de uma imagem (ex.: de uma geração anterior) para animar.",
-          } as never;
+          };
         }
         const body: Record<string, unknown> = {
           prompt: input.prompt,
@@ -196,11 +196,11 @@ function createGenerateVideoTool(attachedImageDataUrl: string | null) {
           return {
             ok: false,
             error: `Geração de vídeo falhou: ${result.error ?? result.status}`,
-          } as never;
+          };
         }
         return { ok: true, urls: stringifyOutputs(result.outputs) };
       } catch (e) {
-        return { ok: false, error: e instanceof Error ? e.message : String(e) } as never;
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
   });

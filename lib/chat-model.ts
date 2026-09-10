@@ -4,18 +4,21 @@
 // O ComposerAction (seletor) grava aqui; o transport (assistant.tsx) lê na
 // hora de enviar cada mensagem, via prepareSendMessagesRequest.
 
-import { CHAT_MODEL_IDS, DEFAULT_CHAT_MODEL } from "@/lib/model-catalog";
+import { CHAT_MODEL_IDS, DEFAULT_CHAT_MODEL, resolveModelAlias } from "@/lib/model-catalog";
 
 export { CHAT_MODEL_IDS, DEFAULT_CHAT_MODEL } from "@/lib/model-catalog";
 
 const MODEL_KEY = "nullain-model";
 const EFFORT_KEY = "nullain-effort";
-const COMPUTER_KEY = "nullain-computer";
+// NOTA: o toggle Computador vive no Zustand store (lib/ui-store.ts, mesma
+// chave "nullain-computer") — não duplicar load/save aqui.
 
 export function loadModel(): string {
   try {
     const saved = localStorage.getItem(MODEL_KEY);
-    if (saved && (CHAT_MODEL_IDS as readonly string[]).includes(saved)) return saved;
+    // Migra IDs legados salvos (renomeados no registry do provider).
+    const resolved = saved ? resolveModelAlias(saved) : null;
+    if (resolved && (CHAT_MODEL_IDS as readonly string[]).includes(resolved)) return resolved;
   } catch {
     // localStorage indisponível (private mode etc.) — usa o default
   }
@@ -42,23 +45,6 @@ export function saveEffort(effort: string | undefined): void {
   try {
     if (effort) localStorage.setItem(EFFORT_KEY, effort);
     else localStorage.removeItem(EFFORT_KEY);
-  } catch {
-    // sem persistência
-  }
-}
-
-export function loadComputer(): boolean {
-  try {
-    return localStorage.getItem(COMPUTER_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-export function saveComputer(enabled: boolean): void {
-  try {
-    if (enabled) localStorage.setItem(COMPUTER_KEY, "1");
-    else localStorage.removeItem(COMPUTER_KEY);
   } catch {
     // sem persistência
   }

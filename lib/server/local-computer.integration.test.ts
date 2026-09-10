@@ -43,7 +43,9 @@ describe.runIf(enabled)("local computer integration", () => {
     expect(snapshot.elements.length).toBeGreaterThan(0);
     expect(screenshot.width).toBe(1280);
     expect(screenshot.height).toBe(800);
-    expect(Buffer.from(screenshot.base64, "base64").subarray(1, 4).toString()).toBe("PNG");
+    expect([...Buffer.from(screenshot.base64, "base64").subarray(0, 3)]).toEqual([
+      0xff, 0xd8, 0xff,
+    ]);
 
     const link = snapshot.elements.find((element) => element.tag === "a");
     expect(link).toBeDefined();

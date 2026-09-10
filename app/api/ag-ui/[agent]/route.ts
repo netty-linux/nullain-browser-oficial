@@ -40,13 +40,14 @@ export const maxDuration = 300;
  * ============================================================================
  */
 
-/** Agentes selecionáveis expostos pelo adaptador AG-UI. */
+/**
+ * Agentes selecionáveis expostos pelo adaptador AG-UI.
+ * Governança: SOMENTE o kernelAgent (supervisor com delegation hooks,
+ * policies em código e memory isolada). Subagentes e o chat legado NÃO são
+ * expostos — fora do kernel eles rodariam sem nenhuma política.
+ */
 const EXPOSED_AGENTS = new Set([
   "kernelAgent", // supervisor Nullain (default do /api/chat)
-  "chatAgent", // legado preservado
-  "researchAgent",
-  "codingAgent",
-  "synthesisAgent",
 ]);
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -184,13 +185,13 @@ export async function POST(
           // Kernel: delegação + memory por thread (paridade com /api/chat).
           ...(agentKey === "kernelAgent"
             ? {
-                ...kernelStreamOptions({
-                  maxSteps: 12,
-                  computerEnabled: Object.keys(gatewayToolMap).some((name) =>
-                    name.startsWith("openbot_computer_"),
-                  ),
-                }),
-                memory: { thread: `nt-${threadId}`, resource: "default-resource" },
+                ...kernelStreamOptions({ maxSteps: 12 }),
+                memory: {
+                  thread: `nt-${threadId}`,
+                  // Resource por thread: a working memory é resource-scoped —
+                  // um valor fixo vazaria preferências entre coworkers/threads.
+                  resource: `agui-${threadId}`,
+                },
               }
             : {}),
           // Gateway tools: as tools `mcp__` concedidas entram como tools

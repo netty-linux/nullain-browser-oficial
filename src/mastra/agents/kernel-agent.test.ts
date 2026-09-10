@@ -15,7 +15,9 @@ describe("Nullain kernel prompt contract", () => {
   });
 
   it("preserves privacy, citation, anti-narration, and graceful-degradation rules", () => {
-    expect(prompt).toContain("NEVER generate, guess, or reconstruct a URL");
+    expect(prompt).toContain("NEVER invent deep links, paths, query strings, or lookalike domains");
+    expect(prompt).toContain("canonical HTTPS homepage");
+    expect(prompt).toContain("If the identity or canonical domain is ambiguous, ask for the URL");
     expect(prompt).toContain("Never expose the memory template");
     expect(prompt).toContain("visible domain");
     expect(prompt).toContain("NEVER narrate routine work or tool calls");

@@ -52,7 +52,6 @@ export const MAX_SKILL_BODY_LENGTH = 5 * 1024 * 1024;
 export const MAX_SKILL_RESOURCE_BYTES = 5 * 1024 * 1024;
 export const MAX_SKILL_RESOURCES = 200;
 const MAX_RUNTIME_SKILL_BODY_LENGTH = 32_000;
-const MAX_SKILLS_INDEX_LENGTH = 16_000;
 
 function truncate(text: string, max = 150): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -346,37 +345,6 @@ export function listUserSkillNames(ownerId: string): string[] {
   return loadSkills(true, ownerId)
     .filter((skill) => skill.source === "user")
     .map((skill) => skill.name);
-}
-
-export function skillsIndexPrompt(
-  disabled: readonly string[] = [],
-  ownerId?: string,
-  allowedNames?: readonly string[],
-): string {
-  const disabledSet = new Set(disabled.map((name) => name.toLowerCase()));
-  const allowed = allowedNames ? new Set(allowedNames.map((name) => name.toLowerCase())) : null;
-  const skills = loadSkills(false, ownerId).filter(
-    (skill) =>
-      !disabledSet.has(skill.name.toLowerCase()) &&
-      (!allowed || allowed.has(skill.name.toLowerCase())),
-  );
-  if (!skills.length) return "";
-  const entries: string[] = [];
-  let used = 0;
-  for (const skill of skills) {
-    const entry = `  <skill><name>${escapeXml(skill.name)}</name><description>${escapeXml(skill.description)}</description></skill>`;
-    if (used + entry.length > MAX_SKILLS_INDEX_LENGTH) break;
-    entries.push(entry);
-    used += entry.length;
-  }
-  return [
-    "## Available Agent Skills",
-    "The following skills provide specialized instructions for specific tasks.",
-    "When a task matches a skill description, call load_skill with its exact name before proceeding.",
-    "<available_skills>",
-    ...entries,
-    "</available_skills>",
-  ].join("\n");
 }
 
 function escapeXml(value: string): string {

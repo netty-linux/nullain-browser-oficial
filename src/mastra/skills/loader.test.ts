@@ -10,18 +10,16 @@ import {
   readSkillFile,
   selectedSkillPrompt,
   skillContentEnvelope,
-  skillsIndexPrompt,
   writeUserSkill,
 } from "./loader";
 
 describe("skill availability", () => {
-  it("removes a disabled skill from the index and direct loading", () => {
-    expect(skillsIndexPrompt(["commit-writer"])).not.toContain("commit-writer");
-    expect(getSkill("commit-writer", ["commit-writer"])).toBeUndefined();
+  it("removes a disabled skill from direct loading", () => {
+    expect(getSkill("skill-creator", ["skill-creator"])).toBeUndefined();
   });
 
   it("rejects an existing identifier instead of overwriting it", () => {
-    expect(() => assertSkillNameAvailable("commit-writer")).toThrow(DuplicateSkillError);
+    expect(() => assertSkillNameAvailable("skill-creator")).toThrow(DuplicateSkillError);
   });
 
   it("exposes native presentation metadata without changing the identifier", () => {
@@ -48,7 +46,6 @@ describe("skill availability", () => {
     expect(readSkillFile(creator!, "references/package-patterns.md")).toContain(
       "Progressive disclosure",
     );
-    expect(skillsIndexPrompt([])).not.toContain("package-patterns.md");
   });
 
   it("makes the freshly validated selected state override stale history", () => {

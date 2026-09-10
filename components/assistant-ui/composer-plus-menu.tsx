@@ -9,7 +9,7 @@
  * - ComposerComputerToggle: mantém o navegador real como controle separado.
  */
 
-import { createContext, useContext, useEffect, useState, type FC } from "react";
+import { createContext, useEffect, useState, type FC } from "react";
 import { ImageIcon, MonitorIcon, PaperclipIcon, PlugIcon, PlusIcon, VideoIcon } from "lucide-react";
 import { ComposerPrimitive } from "@assistant-ui/react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -25,20 +25,26 @@ import {
   saveIntegrations,
 } from "@/lib/chat-model";
 
-/** Contexto do toggle Computador — compartilhado com o aviso de imagem+comptador. */
+import { useUIStore } from "@/lib/ui-store";
+
+/** Contexto legado mantido para compatibilidade */
 export const ComposerComputerContext = createContext<{
   computer: boolean;
   setComputer: (v: boolean | ((prev: boolean) => boolean)) => void;
 }>({ computer: false, setComputer: () => {} });
 
-export const useComposerComputer = () => useContext(ComposerComputerContext);
+export const useComposerComputer = () => {
+  const computer = useUIStore((s) => s.computer);
+  const setComputer = useUIStore((s) => s.setComputer);
+  return { computer, setComputer };
+};
 
 // ---------------------------------------------------------------------------
 // "Computador" — toggle do Computador (navegação/busca por browser real)
 // ---------------------------------------------------------------------------
 
 export const ComposerComputerToggle: FC = () => {
-  // Estado vem do ComposerComputerContext (ThreadRoot) — o mesmo que o aviso de
+  // Estado vem do Zustand store global (lib/ui-store) — o mesmo que o aviso de
   // imagem+computador e o guard de envio leem. Sincronia garantida entre os três.
   const { computer: on, setComputer } = useComposerComputer();
   const { ready: targetReady, target } = useBotComputerTarget();

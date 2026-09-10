@@ -22,12 +22,28 @@ const TOOL_LABELS: Record<string, string> = {
   COMPOSIO_REMOTE_WORKBENCH: "Processou os dados coletados",
   COMPOSIO_REMOTE_BASH_TOOL: "Executou o processamento remoto",
   load_skill: "Carregou conhecimento especializado",
+  skill: "Carregou conhecimento especializado",
+  skill_read: "Leu material de apoio da skill",
+  skill_search: "Buscou conhecimento especializado",
+  nullain_computer_navigate: "Abriu a página",
+  nullain_computer_open_site: "Localizou e abriu o site",
+  nullain_computer_snapshot: "Observou a página",
+  nullain_computer_read: "Verificou a página",
+  nullain_computer_click: "Clicou em um elemento",
+  nullain_computer_type: "Preencheu um campo",
+  nullain_computer_key: "Pressionou uma tecla",
+  nullain_computer_scroll: "Rolou a página",
+  nullain_computer_tabs: "Listou as abas",
+  nullain_computer_switch_tab: "Trocou de aba",
 };
 
 function toolLabel(toolName: string): string {
   const normalized = toolName.replace(/^composio_/i, "");
+  // Prefixo legado openbot_ compartilha os rótulos do nullain_.
+  const canonical = normalized.replace(/^openbot_/i, "nullain_");
   return (
     TOOL_LABELS[normalized] ??
+    TOOL_LABELS[canonical] ??
     normalized
       .replace(/^COMPOSIO_/i, "")
       .replace(/[_-]+/g, " ")

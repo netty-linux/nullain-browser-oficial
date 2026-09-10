@@ -1,8 +1,8 @@
 import { Mastra } from "@mastra/core";
 import { LibSQLStore } from "@mastra/libsql";
+import { PinoLogger } from "@mastra/loggers";
 import { chatAgent } from "./agents/chat-agent";
 import { kernelAgent, KERNEL_POLICY } from "./agents/kernel-agent";
-import { researchAgent } from "./agents/research-agent";
 import { codingAgent } from "./agents/coding-agent";
 import { synthesisAgent } from "./agents/synthesis-agent";
 import { createNullainCodeController } from "./nullain-code/controller";
@@ -36,9 +36,8 @@ export const nullainCodeController = createNullainCodeController(mastraStorage);
 
 export const mastra = new Mastra({
   agents: {
-    // NOVO: kernel (supervisor) + processos.
+    // Kernel (supervisor) + processos governados.
     kernelAgent,
-    researchAgent,
     codingAgent,
     synthesisAgent,
     // LEGADO preservado (zero breaking change na interface de cliente):
@@ -49,7 +48,11 @@ export const mastra = new Mastra({
     nullainCode: nullainCodeController,
   },
   storage: mastraStorage,
-  logger: false,
+  // Logger estruturado (Pino): dá trace_id/span_id nas operações do Mastra
+  // (delegações, tools, memory) em vez do `logger: false` anterior, que
+  // apagava toda a telemetria interna. Os logs de decisão do kernel
+  // ([kernel:delegation]) continuam via console.info.
+  logger: new PinoLogger({ name: "nullain", level: "info" }),
 });
 
 /** Exporta para as rotas usarem o kernel por id (DoD #1). */

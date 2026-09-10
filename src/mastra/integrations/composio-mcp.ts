@@ -90,7 +90,20 @@ async function getClient(consumerKey: string): Promise<{ client: MCPClient; id: 
  * Os tools do Composio Connect como Record<string, Tool> do Mastra — pronto
  * para espalhar no `tools` do agente. Conecta sob demanda (o MCPClient gerencia
  * a conexão HTTP streamable).
+ *
+ * O `listTools()` é cacheado por consumerKey (TTL 5 min): sem cache, cada
+ * mensagem do chat com Plugins ON pagava um round-trip MCP antes mesmo de o
+ * modelo decidir se precisa de integração.
  */
+const TOOLS_TTL_MS = 5 * 60_000;
+type ToolsCacheEntry = { at: number; tools: Record<string, unknown> };
+const globalWithToolsCache = globalThis as typeof globalThis & {
+  __nullainComposioToolsCache?: Map<string, ToolsCacheEntry>;
+};
+const toolsCache =
+  globalWithToolsCache.__nullainComposioToolsCache ??
+  (globalWithToolsCache.__nullainComposioToolsCache = new Map());
+
 export async function getComposioTools(sessionKey?: string): Promise<Record<string, unknown>> {
   const normalizedSessionKey = sanitizeIntegrationKey(sessionKey);
   const consumerKey = isIntegrationConsumerKey(normalizedSessionKey)
@@ -100,16 +113,23 @@ export async function getComposioTools(sessionKey?: string): Promise<Record<stri
     console.warn("[composio-mcp] COMPOSIO_CONSUMER_KEY não configurada");
     return {};
   }
+  const cacheKey = fingerprint(`${composioMcpUrl()}\0${consumerKey}`);
+  const cached = toolsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TOOLS_TTL_MS) return cached.tools;
   let clientId = "";
   try {
     const { client, id } = await getClient(consumerKey);
     clientId = id;
-    return await client.listTools();
+    const tools = (await client.listTools()) as Record<string, unknown>;
+    toolsCache.set(cacheKey, { at: Date.now(), tools });
+    return tools;
   } catch (error) {
     console.warn(
       "[composio-mcp] falha ao conectar ao Composio Connect:",
       error instanceof Error ? error.message : error,
     );
+    // Cache envenenado não serve: remove para a próxima tentativa reconectar.
+    toolsCache.delete(cacheKey);
     // Uma conexão quebrada não deve envenenar todas as tentativas seguintes.
     const failedClient = clientId ? clients.get(clientId) : undefined;
     if (failedClient) {

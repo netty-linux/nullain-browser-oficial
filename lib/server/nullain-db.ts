@@ -10,6 +10,7 @@ const REQUIRED_MIGRATIONS = [
   "003_bot_runtime.sql",
   "004_bot_transcript.sql",
   "005_bot_openbot_link.sql",
+  "006_site_resolution_cache.sql",
 ] as const;
 
 type GlobalDatabase = typeof globalThis & { __nullainAppDatabase?: Database.Database };

@@ -219,6 +219,14 @@ function findSafeEnd(buffer: string, phase: Phase, mode: ReasoningMode): number 
     }
   }
 
+  if (phase === "text") {
+    // Segura um pseudo-header parcial no fim do buffer (ex.: chunk terminou
+    // em "to=functions.nullain_computer_cl") para não emitir metade dele
+    // antes do strip decidir com o texto completo.
+    const partial = partialBareHeaderStart(buffer);
+    if (partial >= 0 && partial < buffer.length) return partial;
+  }
+
   return buffer.length;
 }
 
@@ -228,6 +236,176 @@ function removeSelfClosingTags(buffer: string): string {
     result = result.split(tag).join("");
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo tool-calls em texto ("Harmony sem delimitadores").
+//
+// Alguns modelos Ollama emitem chamadas como TEXTO puro, sem os marcadores
+// `<|start|>/<|channel|>/<|message|>/<|end|>`:
+//
+//   to=functions.nullain_computer_clickjson{"ref":"x","snapshotId":0}commentary
+//   assistant to=commentaryDesculpe, ...
+//
+// Isso NUNCA é uma tool call real (nenhum resultado volta) e vaza na resposta
+// visível — exatamente o `to=functions...` que aparecia no chat. Remove o
+// header, o bloco `json{...}` balanceado e um `commentary` colado logo após.
+// Texto legítimo (código, prosa) nunca contém `to=functions.` e é preservado.
+// ---------------------------------------------------------------------------
+
+const BARE_FN_PREFIX = "to=functions.";
+const BARE_FN_NAME_CHARS = /[A-Za-z0-9_.-]/;
+
+function findBalancedBraceEnd(text: string, openIndex: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = openIndex; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** Estado entre chunks para payload `json{...}` parcial de pseudo-call. */
+export type BareCallStripState = { payloadDepth: number };
+
+export function createBareCallStripState(): BareCallStripState {
+  return { payloadDepth: 0 };
+}
+
+function consumeOpenPayload(text: string, state: BareCallStripState): string {
+  if (state.payloadDepth <= 0) return text;
+  let depth = state.payloadDepth;
+  let inString = false;
+  let escaped = false;
+  let index = 0;
+  for (; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth <= 0) {
+        state.payloadDepth = 0;
+        return text.slice(index + 1);
+      }
+    }
+  }
+  state.payloadDepth = depth;
+  return "";
+}
+
+function stripBareFunctionCalls(text: string, flush: boolean, state: BareCallStripState): string {
+  // 0. Resto de payload de pseudo-call anterior (profundidade entre chunks).
+  let out = consumeOpenPayload(text, state);
+  if (!out) return out;
+  // 1. Headers de canal nus: `[assistant ]to=commentary|final`.
+  //    Remove SÓ o header e mantém o texto seguinte (se o modelo despejou a
+  //    resposta no canal `commentary`, exibi-la é melhor que silêncio).
+  //    `commentary` colado em maiúscula (`commentaryDesculpe`) também vale.
+  out = out
+    .replace(/(^|\s)(?:assistant\s+)?to=commentary(?=\s|$|[A-ZÀ-Ú])/g, "$1")
+    .replace(/(^|\s)(?:assistant\s+)?to=final\b\s*/g, "$1");
+
+  // 2. Pseudo-calls `to=functions.NOME [json{...}] [commentary]`.
+  let result = "";
+  let cursor = 0;
+  while (true) {
+    const headerIndex = out.indexOf(BARE_FN_PREFIX, cursor);
+    if (headerIndex < 0) {
+      result += out.slice(cursor);
+      break;
+    }
+    // Inclui um eventual prefixo "assistant " colado ao header.
+    let start = headerIndex;
+    const before = out.slice(Math.max(0, headerIndex - 10), headerIndex);
+    const assistantPrefix = /assistant\s+$/.exec(before);
+    if (assistantPrefix) start = headerIndex - assistantPrefix[0].length;
+    result += out.slice(cursor, start);
+
+    let end = headerIndex + BARE_FN_PREFIX.length;
+    while (end < out.length && BARE_FN_NAME_CHARS.test(out[end]!)) end += 1;
+    // `json` colado ao nome (`...clickjson{...}`): o sufixo é o canal, não
+    // parte do nome da tool — desde que um `{` venha em seguida.
+    let nameEnd = end;
+    if (
+      nameEnd - (headerIndex + BARE_FN_PREFIX.length) > 4 &&
+      out.slice(nameEnd - 4, nameEnd) === "json"
+    ) {
+      let probe = nameEnd;
+      while (probe < out.length && /\s/.test(out[probe]!)) probe += 1;
+      if (out[probe] === "{") nameEnd -= 4;
+    }
+    // Bloco `json{...}` opcional com chaves balanceadas.
+    let scan = nameEnd;
+    while (scan < out.length && /\s/.test(out[scan]!)) scan += 1;
+    if (out.startsWith("json", scan)) {
+      let brace = scan + 4;
+      while (brace < out.length && /\s/.test(out[brace]!)) brace += 1;
+      if (out[brace] === "{") {
+        const close = findBalancedBraceEnd(out, brace);
+        if (close >= 0) {
+          end = close + 1;
+        } else if (flush) {
+          // Stream terminou no meio do JSON: descarta o resto.
+          cursor = out.length;
+          break;
+        } else {
+          // Chunk parcial: o `{` abriu o payload da pseudo-call — descarta o
+          // header e marca a profundidade; o resto é consumido via estado nos
+          // próximos chunks (nunca vaza como texto).
+          state.payloadDepth = 1;
+          cursor = out.length;
+          break;
+        }
+      }
+    } else {
+      end = nameEnd;
+    }
+    // Palavra `commentary` colada logo após o header/payload.
+    const tail = out.slice(end).match(/^\s*commentary(?=\s|$|[A-ZÀ-Ú])/);
+    if (tail) end += tail[0].length;
+    cursor = end;
+  }
+  return result;
+}
+
+/** Início de um header parcial no fim do buffer (segura até completar). */
+function partialBareHeaderStart(buffer: string): number {
+  const patterns = [
+    /(^|\s)assistant\s*$/,
+    /(^|\s)(?:assistant\s+)?to\s*=$/,
+    /(^|\s)(?:assistant\s+)?to=[A-Za-z0-9_.]*$/,
+    /json\s*\{[^{}]*$/,
+  ];
+  let start = -1;
+  for (const pattern of patterns) {
+    const match = pattern.exec(buffer);
+    if (match?.index !== undefined) {
+      const anchor = match[1]?.length ?? 0;
+      const candidate = match.index + anchor;
+      if (candidate > start) start = candidate;
+    }
+  }
+  return start;
 }
 
 export function thinkingExtractor(): MastraStreamTransform<undefined> {
@@ -247,6 +425,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
     // na mensagem final.
     let sawNativeReasoning = false;
     const harmony = createHarmonyTextSanitizer();
+    const bareCallState = createBareCallStripState();
 
     function makeChunk(type: string, payload: Record<string, unknown>): ChunkType<undefined> {
       return { type, runId, from: chunkFrom, payload } as ChunkType<undefined>;
@@ -284,6 +463,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
       while (buffer.length > 0) {
         if (phase === "text") {
           buffer = removeSelfClosingTags(buffer);
+          buffer = stripBareFunctionCalls(buffer, false, bareCallState);
           if (buffer.length === 0) break;
 
           const opening = findEarliestOpening(buffer);
@@ -414,6 +594,7 @@ export function thinkingExtractor(): MastraStreamTransform<undefined> {
         if (buffer) {
           if (phase === "text") {
             buffer = removeSelfClosingTags(buffer);
+            buffer = stripBareFunctionCalls(buffer, true, bareCallState);
             if (buffer) emitText(controller, buffer);
           } else {
             if (buffer) emitReasoning(controller, buffer);

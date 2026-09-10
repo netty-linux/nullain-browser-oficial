@@ -75,7 +75,6 @@ import {
   loadGenerationMode,
   loadIntegrations,
   loadModel,
-  loadComputer,
 } from "@/lib/chat-model";
 import {
   INTEGRATION_SESSION_KEY,
@@ -88,6 +87,7 @@ import { ComputerSidebar } from "@/components/assistant-ui/computer-sidebar";
 import { SkillSelectionProvider } from "@/components/assistant-ui/skill-selector";
 import { SkillCreatorToolUI } from "@/components/assistant-ui/skill-creator-tool-ui";
 import {
+  isUnauthenticatedError,
   loadBotTranscript,
   mergeBotTranscriptMessages,
   readBotTranscript,
@@ -96,6 +96,7 @@ import {
   useBotTranscriptTarget,
 } from "@/lib/bot-transcript-history";
 import { useEffect, useRef } from "react";
+import { hydrateComputerState, useUIStore } from "@/lib/ui-store";
 import { BotCreatedDataUI, BotReviewDataUI } from "@/components/bots/bot-transcript-cards";
 import { ActiveBotProvider } from "@/components/bots/bot-avatar";
 import { selectBotConversationForThread } from "@/lib/bot-conversation-selection";
@@ -164,6 +165,11 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
   const pathname = usePathname();
   const transcriptTarget = useBotTranscriptTarget();
   const historyAdapter = useBotThreadHistoryAdapter(transcriptTarget);
+  // Restaura o toggle Computador salvo SEM quebrar a hidratação (efeito,
+  // não leitura durante a renderização).
+  useEffect(() => {
+    hydrateComputerState();
+  }, []);
   const runtime = useChatRuntime({
     onThreadIdChange: (threadId) => {
       if (!threadId) return;
@@ -226,7 +232,9 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
           body: {
             messages,
             model,
-            computer: loadComputer(),
+            // Toggle Computador: fonte única é o Zustand store (lib/ui-store),
+            // que persiste na mesma chave — nunca ler localStorage aqui.
+            computer: useUIStore.getState().computer,
             integrations: loadIntegrations(),
             generation: loadGeneration(),
             generationMode: loadGenerationMode(),
@@ -265,7 +273,9 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
           runtime.thread.importExternalState(toBotTranscriptRepository(messages));
         }
       })
-      .catch(console.error);
+      .catch((error) => {
+        if (!isUnauthenticatedError(error)) console.error(error);
+      });
     return () => {
       current = false;
     };
@@ -275,50 +285,18 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
     let current = true;
     let sawActiveRun = false;
     let attempts = 0;
-    let before: number | undefined;
-    const rememberCursor = (snapshot: { messages: unknown[]; nextCursor?: number | null }) => {
-      const first = snapshot.messages[0] as { metadata?: unknown } | undefined;
-      const cursor =
-        snapshot.nextCursor ??
-        (first?.metadata as { nullainSequence?: unknown } | undefined)?.nullainSequence;
-      before = typeof cursor === "number" ? cursor : undefined;
-    };
-    const loadOlder = async () => {
-      if (before === undefined || !current) return;
-      try {
-        const page = await readBotTranscript(transcriptTarget, before);
-        if (!current) return;
-        rememberCursor(page);
-        hydratedMessages.current = mergeBotTranscriptMessages(
-          hydratedMessages.current,
-          page.messages,
-        );
-        runtime.thread.importExternalState(toBotTranscriptRepository(hydratedMessages.current));
-      } catch (error) {
-        console.error(error);
-      }
-    };
-    const onLoadOlder = () => void loadOlder();
-    const dispatchActiveRun = (run: { id: string; status: "queued" | "running" } | null) => {
-      window.dispatchEvent(
-        new CustomEvent("nullain-transcript-active-run", {
-          detail: run
-            ? {
-                botId: transcriptTarget.botId,
-                conversationId: transcriptTarget.conversationId,
-                runId: run.id,
-              }
-            : null,
-        }),
-      );
-    };
     const synchronize = async () => {
       if (!current || document.visibilityState === "hidden" || attempts >= 120) return;
       attempts += 1;
-      const snapshot = await readBotTranscript(transcriptTarget);
+      let snapshot: Awaited<ReturnType<typeof readBotTranscript>>;
+      try {
+        snapshot = await readBotTranscript(transcriptTarget);
+      } catch (error) {
+        // Sem login: encerra o polling em vez de martelar 401 a cada 3s.
+        if (isUnauthenticatedError(error)) attempts = 120;
+        throw error;
+      }
       if (!current) return;
-      rememberCursor(snapshot);
-      dispatchActiveRun(snapshot.activeRun);
       if (snapshot.activeRun) {
         sawActiveRun = true;
         return;
@@ -336,8 +314,6 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
       readBotTranscript(transcriptTarget)
         .then((snapshot) => {
           if (current) {
-            rememberCursor(snapshot);
-            dispatchActiveRun(snapshot.activeRun);
             hydratedMessages.current = mergeBotTranscriptMessages(
               hydratedMessages.current,
               snapshot.messages,
@@ -345,16 +321,19 @@ export const AssistantShell = ({ children }: Readonly<{ children: React.ReactNod
             runtime.thread.importExternalState(toBotTranscriptRepository(hydratedMessages.current));
           }
         })
-        .catch(console.error);
-    void synchronize().catch(console.error);
-    const interval = window.setInterval(() => void synchronize().catch(console.error), 3_000);
+        .catch((error) => {
+          if (!isUnauthenticatedError(error)) console.error(error);
+        });
+    const syncErrors = (error: unknown) => {
+      if (!isUnauthenticatedError(error)) console.error(error);
+    };
+    void synchronize().catch(syncErrors);
+    const interval = window.setInterval(() => void synchronize().catch(syncErrors), 3_000);
     window.addEventListener("nullain-transcript-refresh", refresh);
-    window.addEventListener("nullain-transcript-load-older", onLoadOlder);
     return () => {
       current = false;
       window.clearInterval(interval);
       window.removeEventListener("nullain-transcript-refresh", refresh);
-      window.removeEventListener("nullain-transcript-load-older", onLoadOlder);
     };
   }, [runtime, transcriptTarget]);
 

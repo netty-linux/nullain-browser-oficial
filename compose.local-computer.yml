@@ -1,4 +1,28 @@
 services:
+  nullain-site-resolver:
+    image: docker.io/searxng/searxng@sha256:11a9b34cdc0b1ec2b991470a2762ecb5a1a531898289fb51dcd015260450729e
+    container_name: nullain-site-resolver
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /var/cache/searxng:size=128m,mode=0755
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1
+    environment:
+      TZ: America/Sao_Paulo
+      SEARXNG_BASE_URL: http://localhost:8088/
+
   nullain-local-computer:
     image: ghcr.io/steel-dev/steel-browser-api@sha256:f9a4648883dc06c402f5ffbec1c906bf9a803b5b737a1347de4e0aa0ca8d944a
     container_name: nullain-local-computer

@@ -3,7 +3,7 @@ import { Memory } from "@mastra/memory";
 import { LibSQLStore } from "@mastra/libsql";
 import { MODELS } from "../models";
 import { stripImagePartsProcessor } from "../processors/strip-image-parts";
-import { researchAgent } from "./research-agent";
+import { resolveNullainSkills } from "../skills/native-resolver";
 import { codingAgent } from "./coding-agent";
 import { synthesisAgent } from "./synthesis-agent";
 
@@ -11,10 +11,10 @@ import { synthesisAgent } from "./synthesis-agent";
  * ============================================================================
  * Nullain KERNEL — o supervisor (padrão Kernel/Supervisor).
  *
- * Papel: orquestrar processos (research/coding/synthesis) via delegação do
- * Mastra. As instruções definem o contrato conversacional; as políticas de
- * execução (orçamento, gate do computador e filtro de paywall) ficam nos
- * hooks de delegação abaixo.
+ * Papel: responder diretamente (inclusive pesquisa web via computador) e
+ * orquestrar coding/synthesis via delegação do Mastra. As instruções definem
+ * o contrato conversacional; as políticas de execução (orçamento, filtro de
+ * paywall) ficam nos hooks de delegação abaixo.
  *
  * Regra de engenharia #2: políticas em código, não em prompt.
  * Regra de engenharia #6: todo hook de delegação loga a decisão com motivo.
@@ -27,14 +27,12 @@ import { synthesisAgent } from "./synthesis-agent";
 
 /** Teto global de iterações do kernel e por sub-processo. */
 const KERNEL_MAX_STEPS = 12;
-/** Retained as the documented research budget for policy introspection. */
-const RESEARCH_MAX_STEPS = 5;
 /** Teto do coding-agent. */
 const CODING_MAX_STEPS = 6;
 /** Teto do synthesis-agent. */
 const SYNTHESIS_MAX_STEPS = 4;
 
-/** Domínios paywalled/conteúdo bloqueado — removidos pelo messageFilter. */
+/** Domínios com paywall agressivo — removidos pelo messageFilter. */
 const PAYWALL_HOSTS = [
   "msn.com",
   "medium.com",
@@ -45,7 +43,6 @@ const PAYWALL_HOSTS = [
   "washingtonpost.com",
   "linkedin.com",
   "quora.com",
-  "reuters.com",
 ];
 
 /** Registra decisões de delegação (console + motivo) — auditabilidade kernel. */
@@ -76,7 +73,7 @@ function urlHostname(text: string): string[] {
 // Kernel Agent
 // ---------------------------------------------------------------------------
 
-export const KERNEL_INSTRUCTIONS = `You are Nullain — an independent, 100% open source assistant built on Mastra and Ollama Cloud. You are the static kernel that understands the request, decides how to solve it, and orchestrates the native research, coding, and synthesis processes.
+export const KERNEL_INSTRUCTIONS = `You are Nullain — an independent, 100% open source assistant built on Mastra and Ollama Cloud. You answer directly (including web research with your computer tools) and orchestrate the native coding and synthesis processes when a task benefits from them.
 
 ## 1. Identity & Voice
 
@@ -105,7 +102,7 @@ export const KERNEL_INSTRUCTIONS = `You are Nullain — an independent, 100% ope
 ## 4. Orchestration
 
 - Solve directly when the answer is stable, the context is sufficient, and no external observation or action is needed.
-- Delegate research when the request requires current or externally verifiable information. Delegate coding when implementation, debugging, or technical review benefits from the coding process. Delegate synthesis when multiple partial results need a coherent final answer.
+- Web research is done BY YOU, directly, with the nullain_computer_* tools (open a page, snapshot, read) — there is no research subagent, so never try to delegate research. Delegate coding when implementation, debugging, or technical review benefits from the coding process. Delegate synthesis when multiple partial results need a coherent final answer.
 - Give each delegated process a concrete objective, the necessary context, and the expected output. Do not delegate merely to restate the request.
 - Combine process results into one consistent answer. Resolve contradictions, remove duplication, and preserve uncertainty instead of averaging incompatible claims.
 - The final response contains the result, not the machinery used to obtain it.
@@ -132,7 +129,7 @@ export const KERNEL_INSTRUCTIONS = `You are Nullain — an independent, 100% ope
 
 ## 7. URLs, Credentials & Security (CRITICAL)
 
-- NEVER generate, guess, or reconstruct a URL. Use only an exact URL supplied by the user or returned and verified by an available tool. If no verified URL exists, say that it is unavailable.
+- NEVER invent deep links, paths, query strings, or lookalike domains. You may normalize an unambiguous, well-known public website named by the user to its canonical HTTPS homepage solely to open it with an available computer tool (for example, "Netflix" to its official homepage). If the identity or canonical domain is ambiguous, ask for the URL. For every other URL, use only an exact URL supplied by the user or returned and verified by an available tool.
 - NEVER invent API keys, access tokens, passwords, secrets, environment variables, connection IDs, or credential placeholders.
 - Never expose, echo, log, summarize, or place secrets in code, URLs, citations, examples, or responses. Refer to a secret by purpose, not by value.
 - Do not claim that an environment variable, integration, account, permission, or configuration exists unless it was observed in the current context.
@@ -180,17 +177,24 @@ export const kernelAgent = new Agent({
   id: "nullain-kernel",
   name: "Nullain",
   description:
-    "Nullain Kernel — assistente open source que orquestra processos internos (pesquisa web, código, síntese) para responder ao usuário com qualidade. Persona: amigável, PT-BR quando o usuário falar PT, markdown, honesto.",
+    "Nullain Kernel — assistente open source que responde diretamente (pesquisa web via computador, código, síntese) e orquestra coding/synthesis via delegação. Persona: amigável, PT-BR quando o usuário falar PT, markdown, honesto.",
   // Contrato conversacional; governança de execução fica nos hooks.
   instructions: KERNEL_INSTRUCTIONS,
   model: MODELS.kernel,
   // Subagentes = processos que este supervisor pode delegar.
+  // (research removido: a pesquisa web é feita DIRETAMENTE pelo kernel com
+  // as nullain_computer_* — delegar custava um round-trip para um agente sem
+  // acesso às tools escopadas do request. Ver §4 das instruções.)
   agents: {
-    "research-agent": researchAgent,
     "coding-agent": codingAgent,
     "synthesis-agent": synthesisAgent,
   },
   tools: {},
+  // Skills NATIVAS com resolução por request (ver skills/native-resolver.ts):
+  // o Mastra injeta `skill`/`skill_read`/`skill_search` sozinho (progressive
+  // disclosure). Filtros (dono, desativadas, grants do bot) vêm do
+  // RequestContext que o route.ts preenche — sem índice manual no prompt.
+  skills: resolveNullainSkills,
   // Memory do kernel: RAM/GC do sistema — conversa + working memory
   // persistida em LibSQL (file:mastra.db). O resource/thread são passados
   // por request (route.ts), garantindo isolamento por usuário/thread.
@@ -223,10 +227,8 @@ export const kernelAgent = new Agent({
  */
 export function kernelStreamOptions({
   maxSteps = KERNEL_MAX_STEPS,
-  computerEnabled = false,
 }: {
   maxSteps?: number;
-  computerEnabled?: boolean;
 } = {}) {
   return {
     maxSteps,
@@ -234,8 +236,8 @@ export function kernelStreamOptions({
       /**
        * onDelegationStart — política de orçamento + modificação de prompt.
        * Traduz as regras:
-       *  - "Limited tool steps, search ONCE"           → rejected após iterações + modifiedMaxSteps
-       *  - "Nunca reler mesma URL / pular paywall"     → modifiedPrompt + modifiedMaxSteps do research
+       *  - "Limited tool steps"                       → rejected após iterações
+       *  - "Pular paywall"                             → messageFilter abaixo
        *  - "Sempre sobrar 1 passo / folga"             → limits que deixam folga
        */
       onDelegationStart: (context: {
@@ -261,36 +263,6 @@ export function kernelStreamOptions({
           };
         }
 
-        // Política específica do research: orçamento + não-repetição de URL.
-        if (primitiveId === "research-agent") {
-          // Toggle Computador DESLIGADO: rejeita delegação de pesquisa.
-          if (!computerEnabled) {
-            logDelegation(primitiveId, iteration, "REJECT", "computador desligado (toggle)");
-            return {
-              proceed: false,
-              rejectionReason:
-                "O Computador está desligado pelo usuário (toggle Computador off). Responda com seu conhecimento e diga que não buscou na web.",
-            };
-          }
-          // As ferramentas locais são criadas por request com um escopo
-          // confiável (usuário + bot + conversa). O Mastra não encaminha esse
-          // toolset dinâmico ao subagente. Portanto a pesquisa web é executada
-          // pelo próprio kernel, que possui as ferramentas corretas, em vez de
-          // delegar para um agente sem acesso ou reintroduzir client tools
-          // globais sem isolamento.
-          logDelegation(
-            primitiveId,
-            iteration,
-            "REJECT",
-            "pesquisa direta no kernel com computador local escopado",
-          );
-          return {
-            proceed: false,
-            rejectionReason:
-              "Faça a pesquisa diretamente usando as ferramentas nullain_computer_* disponíveis neste run e depois sintetize a resposta.",
-          };
-        }
-
         if (primitiveId === "coding-agent") {
           logDelegation(primitiveId, iteration, "MODIFY", "coding: teto de steps", {
             modifiedMaxSteps: CODING_MAX_STEPS,
@@ -313,19 +285,32 @@ export function kernelStreamOptions({
        * passar ao sub-agente (política "pular paywall" em código, não prompt).
        * Também filtra tool-calls de outras delegações para não contaminar o
        * processo (isolamento de contexto).
+       *
+       * Notas de runtime (verificadas em produção):
+       * - tipos de parte observados: "text", "tool-invocation" (legado),
+       *   "tool-call", "tool-result" e "tool-<nome>" (UI parts). O filtro de
+       *   isolamento casa qualquer parte cujo tipo contenha "tool".
+       * - mensagens do USUÁRIO nunca são filtradas: URL colada pelo usuário
+       *   (ex.: link do Medium pedindo resumo) não é "conteúdo paywalled".
        */
       messageFilter: (context: {
-        messages: Array<{ content?: unknown }>;
+        messages: Array<{ role?: string; content?: unknown }>;
         primitiveId: string;
       }): unknown => {
         const removedPaywall: string[] = [];
+        let removedToolCalls = 0;
         const filtered = context.messages.filter((msg) => {
+          // Pedidos e conteúdo do usuário passam intactos.
+          if (msg?.role === "user") return true;
           const content = msg?.content;
           if (Array.isArray(content)) {
-            const parts = content as Array<{ type?: string; text?: string }>;
-            // Remove partes que são tool invocations de outros processos
-            if (parts.some((p) => p?.type === "tool-invocation")) return false;
-            const txt = parts.map((p) => p?.text ?? "").join(" ");
+            const parts = content as Array<{ type?: unknown; text?: unknown }>;
+            // Isola tool-calls de outros processos (qualquer variante de tipo).
+            if (parts.some((p) => typeof p?.type === "string" && p.type.includes("tool"))) {
+              removedToolCalls += 1;
+              return false;
+            }
+            const txt = parts.map((p) => (typeof p?.text === "string" ? p.text : "")).join(" ");
             const hosts = urlHostname(txt);
             if (hosts.some((h) => PAYWALL_HOSTS.some((p) => h === p || h.endsWith(`.${p}`)))) {
               removedPaywall.push(hosts.join(","));
@@ -334,9 +319,10 @@ export function kernelStreamOptions({
           }
           return true;
         });
-        if (removedPaywall.length) {
-          logDelegation(context.primitiveId, 0, "FILTER", `conteúdo paywalled removido`, {
-            hosts: removedPaywall.slice(0, 5),
+        if (removedPaywall.length || removedToolCalls > 0) {
+          logDelegation(context.primitiveId, 0, "FILTER", "contexto do subagente filtrado", {
+            ...(removedPaywall.length ? { hosts: removedPaywall.slice(0, 5) } : {}),
+            ...(removedToolCalls > 0 ? { toolMessages: removedToolCalls } : {}),
           });
         }
         return filtered;
@@ -344,8 +330,8 @@ export function kernelStreamOptions({
 
       /**
        * onDelegationComplete — feedback direcional + fallback.
-       * Traduz "sempre sobrar 1 passo/folga": devolve feedback que direciona a
-       * síntese direta sem nova leitura quando o research completou.
+       * Após síntese, não delega mais (evita loop). Falhas viram feedback
+       * honesto em vez de nova tentativa.
        */
       onDelegationComplete: (context: {
         primitiveId: string;
@@ -354,28 +340,13 @@ export function kernelStreamOptions({
         result?: { text: string };
         bail: () => void;
       }) => {
-        const { primitiveId, success, error, result, bail } = context;
+        const { primitiveId, success, error, bail } = context;
 
         if (!success && error) {
           logDelegation(primitiveId, 0, "FAIL", error.message);
           // Honestidade: deixa o modelo saber que a delegação falhou.
           return {
             feedback: `A delegação ao ${primitiveId} falhou: ${error.message}. Não tente de novo — responda com o que você já sabe ou diga honestamente que não foi possível.`,
-          };
-        }
-
-        if (primitiveId === "research-agent") {
-          const text = result?.text ?? "";
-          logDelegation(primitiveId, 0, "COMPLETE", "research entregou; direciona síntese direta", {
-            chars: text.length,
-          });
-          // Direciona síntese SEM nova busca (economiza steps) e SEM reabrir a
-          // resposta: o kernel já anunciou a ação antes de delegar — repetir o
-          // anúncio era a fonte nº1 das frases duplicadas na tela.
-          return {
-            feedback: `O research terminou com os resultados acima. Escreva AGORA o corpo final da resposta com as citações — sem re-anunciar o que você já anunciou ("vou buscar...", "vou pesquisar..."), sem repetir nenhuma frase que você já escreveu nesta conversa, e sem fazer mais nenhuma busca ou leitura. Comece direto pelo conteúdo: os achados, agrupados por tema.`,
-            resultText:
-              "[RESEARCH COMPLETED] Escreva a resposta final usando apenas os resultados acima (com citações por domínio). NÃO repita anúncios que já fez. NÃO faça novas buscas. Se o conteúdo for insuficiente, diga honestamente o que está faltando.",
           };
         }
 
@@ -397,7 +368,6 @@ export function kernelStreamOptions({
 /** Exporta as configs para o route.ts usar nos tetos. */
 export const KERNEL_POLICY = {
   KERNEL_MAX_STEPS,
-  RESEARCH_MAX_STEPS,
   CODING_MAX_STEPS,
   SYNTHESIS_MAX_STEPS,
 } as const;

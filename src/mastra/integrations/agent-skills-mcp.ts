@@ -13,6 +13,11 @@ const globalWithAgentSkills = globalThis as typeof globalThis & {
   __nullainAgentSkillsMcpClient?: MCPClient;
 };
 
+// A doc MCP muda raramente: cachear o listTools (TTL 10 min) evita um
+// round-trip de rede a cada criação de skill.
+const TOOLS_TTL_MS = 10 * 60_000;
+let toolsCacheEntry: { at: number; tools: Record<string, unknown> } | null = null;
+
 export function agentSkillsMcpUrl(): string {
   return process.env.AGENT_SKILLS_MCP_URL ?? DEFAULT_AGENT_SKILLS_MCP_URL;
 }
@@ -53,13 +58,18 @@ export function selectAgentSkillsDocsTools(
 }
 
 export async function getAgentSkillsDocsTools(): Promise<Record<string, unknown>> {
+  const cached = toolsCacheEntry;
+  if (cached && Date.now() - cached.at < TOOLS_TTL_MS) return cached.tools;
   try {
-    return selectAgentSkillsDocsTools(await (await getClient()).listTools());
+    const tools = selectAgentSkillsDocsTools(await (await getClient()).listTools());
+    toolsCacheEntry = { at: Date.now(), tools };
+    return tools;
   } catch (error) {
     console.warn(
       "[agent-skills-mcp] documentation server unavailable:",
       error instanceof Error ? error.message : error,
     );
+    toolsCacheEntry = null;
     const client = globalWithAgentSkills.__nullainAgentSkillsMcpClient;
     delete globalWithAgentSkills.__nullainAgentSkillsMcpClient;
     await client?.disconnect().catch(() => undefined);
@@ -67,7 +77,12 @@ export async function getAgentSkillsDocsTools(): Promise<Record<string, unknown>
   }
 }
 
+export function clearAgentSkillsDocsCache(): void {
+  toolsCacheEntry = null;
+}
+
 export async function closeAgentSkillsMcp(): Promise<void> {
+  toolsCacheEntry = null;
   const client = globalWithAgentSkills.__nullainAgentSkillsMcpClient;
   delete globalWithAgentSkills.__nullainAgentSkillsMcpClient;
   await client?.disconnect().catch(() => undefined);

@@ -13,7 +13,7 @@ async function main() {
   const outputDirectory = path.join(path.dirname(config.databasePath), "backups");
   fs.mkdirSync(outputDirectory, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const target = path.join(outputDirectory, `nullain-app.pre-004-${stamp}.db`);
+  const target = path.join(outputDirectory, `nullain-app.pre-migration-${stamp}.db`);
   const database = openNullainDatabase(config.databasePath);
   try {
     await database.backup(target);

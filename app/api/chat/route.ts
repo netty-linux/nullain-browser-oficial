@@ -5,16 +5,24 @@ import { RequestContext } from "@mastra/core/request-context";
 import { mastra } from "@/src/mastra";
 import { REASONING_MODELS, ollamaProviderOptions } from "@/src/mastra/models";
 import { thinkingExtractor } from "@/src/mastra/transforms/thinking-stream";
-import { KERNEL_INSTRUCTIONS, kernelStreamOptions } from "@/src/mastra/agents/kernel-agent";
-import { getSkill, selectedSkillPrompt, skillsIndexPrompt } from "@/src/mastra/skills/loader";
-import { createSkillsToolset } from "@/src/mastra/tools/skill-tools";
-import { createLocalComputerTools } from "@/src/mastra/tools/local-computer-tools";
+import { kernelStreamOptions } from "@/src/mastra/agents/kernel-agent";
+import { getSkill } from "@/src/mastra/skills/loader";
+import { SKILL_CONTEXT_KEYS } from "@/src/mastra/skills/native-resolver";
+import { buildChatInstructions } from "@/lib/server/chat-instructions";
+import { buildChatToolsets } from "@/lib/server/chat-toolsets";
+import {
+  createComputerAwareToolCallRepair,
+  repairMalformedToolCall,
+} from "@/lib/server/tool-call-repair";
+import { updateComputerToolOutcome } from "@/lib/server/computer-tool-outcome";
 import { isLocalComputerEnabled } from "@/lib/server/local-computer";
-import { getComposioTools } from "@/src/mastra/integrations/composio-mcp";
-import { getAgentSkillsDocsTools } from "@/src/mastra/integrations/agent-skills-mcp";
 import { sanitizeIntegrationKey } from "@/lib/integration-key";
-import { createWaveSpeedToolset } from "@/src/mastra/tools/wavespeed-tools";
-import { CHAT_MODEL_IDS, DEFAULT_VISION_CHAT_MODEL, isVisionChatModel } from "@/lib/model-catalog";
+import {
+  CHAT_MODEL_IDS,
+  DEFAULT_VISION_CHAT_MODEL,
+  isVisionChatModel,
+  resolveSelectedModel,
+} from "@/lib/model-catalog";
 import {
   getLatestUserImageDataUrl,
   hasLatestUserImage,
@@ -69,7 +77,7 @@ const DEFAULT_EFFORT_BY_MODEL: Record<string, "low" | "medium" | "high"> = {
   "ollama-cloud/gpt-oss:20b": "high",
   "ollama-cloud/gpt-oss:120b": "high",
   "ollama-cloud/deepseek-v4-flash:0731": "low",
-  "ollama-cloud/deepseek-v4-pro:0813": "low",
+  "ollama-cloud/deepseek-v4-pro": "low",
   "ollama-cloud/kimi-k3": "medium",
   "ollama-cloud/kimi-k2.7-code": "medium",
   "ollama-cloud/kimi-k2.6": "medium",
@@ -78,7 +86,7 @@ const DEFAULT_EFFORT_BY_MODEL: Record<string, "low" | "medium" | "high"> = {
   "ollama-cloud/glm-5.2": "high",
   "ollama-cloud/glm-5.1": "low",
   "ollama-cloud/glm-5.3-flash": "low",
-  "ollama-cloud/qwen3.5": "low",
+  "ollama-cloud/qwen3.5:397b": "low",
   "ollama-cloud/nemotron-3-ultra": "medium",
   "ollama-cloud/nemotron-3-nano:30b": "medium",
 };
@@ -93,13 +101,13 @@ const WEB_EFFORT_BY_MODEL: Record<string, "low" | "medium" | "high"> = {
   "ollama-cloud/gpt-oss:20b": "low",
   "ollama-cloud/gpt-oss:120b": "medium",
   "ollama-cloud/deepseek-v4-flash:0731": "medium",
-  "ollama-cloud/deepseek-v4-pro:0813": "medium",
+  "ollama-cloud/deepseek-v4-pro": "medium",
   "ollama-cloud/kimi-k3": "medium",
   "ollama-cloud/kimi-k2.7-code": "high",
   "ollama-cloud/glm-5.2": "high",
   "ollama-cloud/glm-5.1": "medium",
   "ollama-cloud/glm-5.3-flash": "low",
-  "ollama-cloud/qwen3.5": "medium",
+  "ollama-cloud/qwen3.5:397b": "medium",
   "ollama-cloud/minimax-m3": "medium",
 };
 
@@ -107,7 +115,9 @@ function normalizeModel(input?: string): string | undefined {
   if (!input) return undefined;
   const aliasMap: Record<string, string> = {
     "deepseek-v4-flash:0731-cloud": "ollama-cloud/deepseek-v4-flash:0731",
-    "deepseek-v4-pro:0813-cloud": "ollama-cloud/deepseek-v4-pro:0813",
+    "deepseek-v4-pro:0813-cloud": "ollama-cloud/deepseek-v4-pro",
+    "deepseek-v4-pro:0813": "ollama-cloud/deepseek-v4-pro",
+    "ollama-cloud/deepseek-v4-pro:0813": "ollama-cloud/deepseek-v4-pro",
     "kimi-k3:cloud": "ollama-cloud/kimi-k3",
     "kimi-k2.7-code:cloud": "ollama-cloud/kimi-k2.7-code",
     "kimi-k2.6:cloud": "ollama-cloud/kimi-k2.6",
@@ -115,8 +125,12 @@ function normalizeModel(input?: string): string | undefined {
     "glm-5.2:cloud": "ollama-cloud/glm-5.2",
     "glm-5.1:cloud": "ollama-cloud/glm-5.1",
     "glm-5.3-flash:cloud": "ollama-cloud/glm-5.3-flash",
-    "qwen3.5:cloud": "ollama-cloud/qwen3.5",
-    "gemma4:cloud": "ollama-cloud/gemma4",
+    "qwen3.5:cloud": "ollama-cloud/qwen3.5:397b",
+    "qwen3.5": "ollama-cloud/qwen3.5:397b",
+    "ollama-cloud/qwen3.5": "ollama-cloud/qwen3.5:397b",
+    "gemma4:cloud": "ollama-cloud/gemma4:31b",
+    gemma4: "ollama-cloud/gemma4:31b",
+    "ollama-cloud/gemma4": "ollama-cloud/gemma4:31b",
     "minimax-m3:cloud": "ollama-cloud/minimax-m3",
     "minimax-m2.7:cloud": "ollama-cloud/minimax-m2.7",
     "nemotron-3-ultra:cloud": "ollama-cloud/nemotron-3-ultra",
@@ -358,8 +372,18 @@ export async function POST(req: Request) {
     );
   }
   const hasCurrentImage = hasLatestUserImage(currentMessages);
-  let selectedModel =
-    botRuntime?.bot.modelId ?? normalized ?? process.env.MASTRA_MODEL ?? "ollama-cloud/gpt-oss:20b";
+  // Precedência de modelo (regra de produto):
+  // - Computador ON → GPT-OSS 20B sempre (resolveSelectedModel força).
+  // - Computador OFF → a seleção do composer vence; modelId do bot (com
+  //   migração de aliases legados) e env são fallbacks sem seleção explícita.
+  // Antes, o modelId do bot vencia SEMPRE — por isso o billing só mostrava
+  // gpt-oss:20b mesmo com outro modelo selecionado.
+  // modelId de bot persistido pode usar IDs legados (renomeados no registry) —
+  // normaliza antes de usar, igual ao modelo do request.
+  const botModel = normalizeModel(botRuntime?.bot.modelId) ?? botRuntime?.bot.modelId;
+  const requestedModel =
+    normalized ?? botModel ?? process.env.MASTRA_MODEL ?? "ollama-cloud/gpt-oss:20b";
+  let selectedModel = resolveSelectedModel({ requestedModel, computer: Boolean(computer) });
   if (hasCurrentImage && !isVisionChatModel(selectedModel)) {
     selectedModel = DEFAULT_VISION_CHAT_MODEL;
   }
@@ -555,37 +579,55 @@ export async function POST(req: Request) {
     VISION_INPUT_CONTEXT_KEY,
     hasCurrentImage && isVisionChatModel(selectedModel),
   );
+  // Filtros do resolver NATIVO de skills (kernelAgent.skills): o Mastra lê
+  // estes valores via requestContext e injeta `skill`/`skill_read`/
+  // `skill_search` já filtrados — sem índice manual no system prompt.
+  requestContext.setRaw(SKILL_CONTEXT_KEYS.ownerId, ownerId ?? null);
+  requestContext.setRaw(SKILL_CONTEXT_KEYS.disabledSkills, disabled);
+  requestContext.setRaw(SKILL_CONTEXT_KEYS.grantedSkills, grantedSkills ?? null);
+  requestContext.setRaw(SKILL_CONTEXT_KEYS.selectedSkill, selectedSkill?.name ?? null);
   streamOptions.requestContext = requestContext;
 
   // Kernel: delegação governada em CÓDIGO + memory persistente por thread.
   // O thread/resource vem do header (ou default por sessão) para isolamento.
-  const kernelDelegation = kernelStreamOptions({ computerEnabled: Boolean(computer) });
+  const kernelDelegation = kernelStreamOptions();
   streamOptions.delegation = kernelDelegation.delegation;
   streamOptions.maxSteps = 12;
   // Memory do kernel: ativa a janela de conversa + working memory.
   // thread: por conversa de cliente (estável), para a memória persistir
   // entre requests na mesma thread (DoD #4).
+  // resource: a working memory do Mastra é resource-scoped (persiste entre
+  // threads do MESMO resource). Um valor fixo vazava preferências entre
+  // usuários/sessões — por isso o resource é por usuário logado, ou por
+  // sessão anônima (threadId estável do navegador).
   streamOptions.memory = {
     thread: botRuntime
       ? `bot-${botRuntime.bot.id}-${botRuntime.conversation.mastraThreadId}`
       : `nt-${requestThreadId}`,
     resource: botRuntime
       ? `user-${ownerId}:bot-${botRuntime.bot.id}:conversation-${botRuntime.conversation.id}`
-      : "default-resource",
+      : ownerId
+        ? `user-${ownerId}`
+        : `anon-${requestThreadId}`,
     ...(botRuntime ? { options: { lastMessages: false } } : {}),
   };
+  // Nota (verificada no doc `reference-memory-memory-class`): lastMessages:false
+  // significa "não carrega nem SALVA mensagens" — para bots, a Memory do Mastra
+  // vira no-op deliberado (o transcript SQLite é a fonte canônica; o resource
+  // inclui a conversation, então working memory nunca acumularia nada útil).
+  // Sem memory tools no toolset, também não há updates de working memory.
   // O transcript SQLite é a fonte canônica do histórico visual. Para bots,
   // carregamos somente seu texto validado como contexto e desativamos a janela
   // de mensagens do Mastra: client tool invocations salvas pelo Mastra podem
   // virar uma sequência OpenAI inválida no turno seguinte.
   if (botRuntime && botTextContext.length > 0) streamOptions.context = botTextContext;
 
-  // Skills: tool load_skill + índice no prompt SEMPRE ativos (progressive
-  // disclosure — o índice custa ~40 tokens/skill; o corpo só entra quando o
-  // agente chama load_skill). Skills desativadas no popover são filtradas
-  // do índice E do load_skill.
+  // Skills NATIVAS (Agent.skills + resolver dinâmico via RequestContext):
+  // descoberta progressiva com as tools `skill`/`skill_read`/`skill_search`
+  // injetadas pelo Mastra — sem índice manual no prompt. Filtros (dono,
+  // desativadas, grants do bot) viajam no requestContext (ver acima).
   // Toolsets condicionais aos toggles do composer:
-  // - skills: SEMPRE ativos (progressive disclosure).
+  // - create_skill: SOMENTE com pedido explícito (allowSkillCreation).
   // - composio (1000+ integrações): SOMENTE quando o toggle Plugins está
   //   ligado. As tools vêm do MCP Composio Connect (meta-tools COMPOSIO_*),
   //   não de toolsets locais — o OAuth é gerenciado pelo próprio Composio.
@@ -600,98 +642,44 @@ export async function POST(req: Request) {
     Boolean(ownerId) &&
     !disabled.some((name) => name.toLowerCase() === "skill-creator") &&
     explicitlyRequestsSkillCreation(latestUserText(currentMessages));
-  const botMayUseOptionalTools = !botRuntime || Boolean(botRuntime.bot.isSystem);
   const useLocalComputer = Boolean(computer && botRuntime && isLocalComputerEnabled());
-  const localComputerTools =
+
+  const { toolsets, composioTools } = await buildChatToolsets({
+    ownerId,
+    allowSkillCreation,
+    botRuntime,
+    integrations,
+    sessionIntegrationKey,
+    generation,
+    attachedImageDataUrl,
+    useLocalComputer,
+  });
+
+  streamOptions.toolsets = toolsets;
+  streamOptions.clientTools = {};
+
+  const integrationsAvailable = Object.keys(composioTools).length > 0;
+  const requestInstructions = buildChatInstructions({
+    botRuntime,
+    selectedSkill,
+    computer,
+    useLocalComputer,
+    integrationsAvailable,
+    generation,
+    generationMode,
+  });
+  streamOptions.instructions = requestInstructions;
+  // Ollama/OpenAI-compatible streams can append empty `{}` deltas after a
+  // complete tool input (for example `{"url":"..."}{}{}`). Repair this
+  // narrow transport defect before schema validation/tool execution.
+  streamOptions.experimental_repairToolCall =
     useLocalComputer && botRuntime && ownerId
-      ? createLocalComputerTools({
+      ? createComputerAwareToolCallRepair({
           ownerUserId: ownerId,
           botId: botRuntime.bot.id,
           conversationId: botRuntime.conversation.id,
         })
-      : {};
-  const composioTools =
-    integrations && botMayUseOptionalTools ? await getComposioTools(sessionIntegrationKey) : {};
-  const agentSkillsDocsTools = allowSkillCreation ? await getAgentSkillsDocsTools() : {};
-  streamOptions.toolsets = {
-    ...createSkillsToolset(disabled, {
-      ownerId,
-      allowCreate: allowSkillCreation,
-      allowedSkillNames: grantedSkills ?? undefined,
-    }),
-    ...(generation && botMayUseOptionalTools ? createWaveSpeedToolset(attachedImageDataUrl) : {}),
-    ...(Object.keys(composioTools).length > 0 ? { composio: composioTools } : {}),
-    ...(Object.keys(agentSkillsDocsTools).length > 0
-      ? { agentSkillsDocs: agentSkillsDocsTools }
-      : {}),
-    ...(Object.keys(localComputerTools).length > 0 ? { localComputer: localComputerTools } : {}),
-  };
-  // Tools CLIENT (executadas no browser): o servidor declara ao modelo e emite
-  // a tool-call, mas NÃO executa — o frontend executa via proxy (cookie de
-  // sessão) e devolve o resultado via addResult. É o padrão do OpenBot para
-  // todas as ações governadas do computador (Inversão FASE 5).
-  //
-  // AGORA GATEADO pelo toggle Computador: desligado, o modelo não vê a tool —
-  // o computador só é usado quando o usuário liga. As instruções do computador
-  // (buildInstructions) também só são injetadas quando ativo.
-  streamOptions.clientTools = {};
-  // O kernel é um supervisor: NÃO injetamos aqui as instruções de web search
-  // (a pesquisa é delegada ao research-agent, que já tem suas regras próprias).
-  // A persona vem do instructions do próprio kernelAgent (default). Mantemos
-  // apenas instruções adicionais pontuais de integrações (toggle Plug) e de
-  // geração (toggle Geração) quando ativas.
-  const integrationsAvailable = Object.keys(composioTools).length > 0;
-  const integrationsInstructions = integrationsAvailable
-    ? `As integrações externas estão ativas (toggle Plugins). Você dispõe das meta-tools do Composio (COMPOSIO_SEARCH_TOOLS, COMPOSIO_GET_TOOL_SCHEMAS, COMPOSIO_MULTI_EXECUTE_TOOL, COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_WAIT_FOR_CONNECTIONS) para agir em serviços externos (GitHub, Gmail, Meta Ads, Instagram...).
-
-FORMATOS DE ARGUMENTO (o MCP não expõe schemas completos — siga EXATAMENTE):
-- COMPOSIO_MANAGE_CONNECTIONS: { "toolkits": ["github"] } — toolkits é um array de STRINGS (slugs oficiais). Retorna o status das conexões e gera o fluxo de autorização quando necessário.
-- COMPOSIO_WAIT_FOR_CONNECTIONS: { "toolkits": ["github"] } — array de STRINGS. Chame DEPOIS de compartilhar um link de auth, para aguardar a aprovação.
-- COMPOSIO_SEARCH_TOOLS: { "queries": [{ "use_case": "create an issue on github" }] } — queries é um array de OBJETOS com "use_case" descrevendo o que o usuário quer em linguagem natural.
-- COMPOSIO_GET_TOOL_SCHEMAS: { "toolSlugs": ["GITHUB_CREATE_ISSUE", ...] }.
-- COMPOSIO_MULTI_EXECUTE_TOOL: { "toolCalls": [{ "toolSlug": "...", "arguments": {...} }] }.
-
-Fluxo: COMPOSIO_SEARCH_TOOLS descobre as tools → COMPOSIO_GET_TOOL_SCHEMAS pega os schemas → COMPOSIO_MULTI_EXECUTE_TOOL executa. Se um app não estiver conectado, o COMPOSIO_MANAGE_CONNECTIONS retorna um redirect_url (expira em 10 min). A interface intercepta esse endereço e mostra o fluxo em um modal: NÃO repita nem exponha a URL em markdown; apenas informe brevemente que a autorização está pronta e use COMPOSIO_WAIT_FOR_CONNECTIONS para esperar a aprovação. O usuário também pode gerenciar conexões na aba Plugins da sidebar.`
-    : "";
-  const generationInstructions = generation
-    ? `A geração de mídia está ativa (toggle Geração). Você dispõe de tools de geração (generate_image, generate_video) via WaveSpeed. Modo selecionado pelo usuário: ${generationMode === "video" ? "VÍDEO" : "IMAGEM"}.
-- REGRA DE ESCLARECIMENTO (obrigatória): ANTES de chamar generate_image ou generate_video, SEMPRE faça perguntas de esclarecimento ao usuário para não gerar aleatoriamente. Pergunte o que for relevante para o modo:
-  - Modo IMAGEM: estilo/estética (realista, anime, 3D, pintura, minimalista...), proporção/orientação (quadrada, retrato, paisagem), paleta de cores, e qualquer detalhe do assunto que esteja vago.
-  - Modo VÍDEO: além do estilo, pergunte a duração (5s ou 8s) e o movimento/ação desejado (o que deve acontecer na cena).
-  - Se o usuário já forneceu detalhes suficientes no pedido, faça apenas 1-2 perguntas rápidas de confirmação (ex.: "Qual estilo você prefere?"). NUNCA gere sem ao menos confirmar os pontos-chave.
-  - Espere a resposta do usuário antes de chamar a tool. Só chame generate_image/generate_video depois que os detalhes estiverem claros.
-- Modo IMAGEM: chame generate_image com um prompt descritivo (estilo + proporção + paleta + assunto) para criar a imagem.
-- Modo VÍDEO: chame generate_video para animar uma imagem. A imagem de origem pode ser (a) a URL de um generate_image anterior, (b) uma URL pública, ou (c) a imagem anexada pelo usuário no composer — neste caso NÃO precisa passar o parâmetro image, o backend a usa automaticamente.
-Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/vídeo inline). Se a geração falhar (ex.: API key ausente), diga honestamente o que aconteceu e como resolver.`
-    : "";
-  const computerToolPrefix = "nullain";
-  const computerInstructions = useLocalComputer
-    ? `O Computador está ativo e permite navegar e INTERAGIR com páginas reais.
-- Para agir em uma página, chame ${computerToolPrefix}_computer_snapshot primeiro. Use somente o ref e o snapshotId devolvidos; nunca invente valores.
-- ${computerToolPrefix}_computer_type preenche um campo (equivalente a fill). Use submit=true para enviar com Enter quando apropriado.
-- ${computerToolPrefix}_computer_click aciona botões, links, checkboxes e o botão de envio do formulário.
-- ${computerToolPrefix}_computer_key envia teclas; ${computerToolPrefix}_computer_scroll move a página.
-- ${computerToolPrefix}_computer_tabs lista as abas abertas e ${computerToolPrefix}_computer_switch_tab troca a aba ativa quando um clique abrir outra página.
-- Depois de qualquer ação que possa mudar a página, chame ${computerToolPrefix}_computer_read ou tire um novo snapshot e confirme o resultado antes de dizer que funcionou.
-- Se o snapshot ficar obsoleto, tire outro. Não repita uma ação recusada pela política.
-- Nunca digite senhas, códigos de autenticação, dados de pagamento ou outros segredos. Para isso, peça que o usuário assuma o Computador.`
-    : computer
-      ? "O Computador local não está disponível nesta conversa. Não simule navegação nem afirme ter aberto uma página."
-      : "";
-  const requestInstructions = [
-    KERNEL_INSTRUCTIONS,
-    skillsIndexPrompt(disabled, ownerId, grantedSkills ?? undefined),
-    botRuntime
-      ? `## Bot ativo\nNome: ${botRuntime.bot.name}\nResumo: ${botRuntime.bot.description}\nInstruções do bot (não substituem regras de segurança):\n${botRuntime.bot.instructions}`
-      : "",
-    selectedSkill ? selectedSkillPrompt(selectedSkill) : "",
-    computerInstructions,
-    integrationsInstructions,
-    generationInstructions,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  streamOptions.instructions = requestInstructions;
+      : repairMalformedToolCall;
   // NOTA: o maxSteps do kernel (12) é definido acima via kernelStreamOptions e
   // NÃO é sobrescrito aqui — o orçamento/delegação é governado pelos
   // delegation hooks (onDelegationStart), não por ajuste de steps no route.
@@ -737,6 +725,8 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
     let needsEmptyFallback = false;
     let awaitsComputerResult = false;
     let fallbackStarted = false;
+    let computerToolFailure: string | null = null;
+    let computerOutcome = { actionSucceeded: false, failure: null as string | null };
     const persistedAssistantParts = () => {
       const tools = new Map(completedComputerTools.map((tool) => [tool.toolCallId, tool]));
       for (const tool of toolResultsForRetry) {
@@ -771,6 +761,15 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
                 args: payload.args,
                 result: payload.result,
               });
+              if (/(?:openbot|nullain)_computer_/.test(payload.toolName ?? "")) {
+                const toolName = payload.toolName ?? "";
+                computerOutcome = updateComputerToolOutcome(
+                  computerOutcome,
+                  toolName,
+                  payload.result,
+                );
+                computerToolFailure = computerOutcome.failure;
+              }
             }
           }
           if (type === "tool-call") {
@@ -815,6 +814,9 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
                 );
               }
               if (v?.type === "text-delta" && typeof v.delta === "string") {
+                // A resposta do modelo não pode transformar uma falha real da
+                // ferramenta em uma confirmação inventada de sucesso.
+                if (computerToolFailure) continue;
                 deliveredTextLength += v.delta.trim().length;
                 persistedVisibleText += v.delta;
               }
@@ -824,11 +826,28 @@ Sempre apresente o resultado com a mídia gerada (a interface exibe a imagem/ví
             reader.releaseLock();
           }
 
+          if (computerToolFailure) {
+            const failureText = `Não consegui concluir a ação no computador: ${computerToolFailure}`;
+            persistedVisibleText = failureText;
+            writer.write({ type: "text-start", id: "nullain-computer-failure" } as never);
+            writer.write({
+              type: "text-delta",
+              id: "nullain-computer-failure",
+              delta: failureText,
+            } as never);
+            writer.write({ type: "text-end", id: "nullain-computer-failure" } as never);
+          }
+
           // Run terminou sem texto mas com tool results? Refaz sem tools.
           // GUARD DUPLo: só dispara se (a) o fluxo mastra não produziu texto E
           // (b) NADA foi entregue ao usuário. Um retry sobre conteúdo visível
           // duplica frases na tela — o bug das respostas repetidas.
-          if (needsEmptyFallback && !fallbackStarted && deliveredTextLength === 0) {
+          if (
+            needsEmptyFallback &&
+            !fallbackStarted &&
+            deliveredTextLength === 0 &&
+            !computerToolFailure
+          ) {
             fallbackStarted = true;
             console.warn(
               `[/api/chat] empty-answer fallback: run ended without text after ${toolResultsForRetry.length} tool calls — retrying without tools`,

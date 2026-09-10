@@ -68,7 +68,7 @@ const DEFAULT_MIN_HEIGHT = 200;
 async function preloadFrame(base64: string): Promise<void> {
   try {
     const image = new Image();
-    image.src = `data:image/png;base64,${base64}`;
+    image.src = `data:image/jpeg;base64,${base64}`;
     await image.decode();
   } catch {
     // Deixa o <img> visível tratar falhas de decode.
@@ -265,7 +265,10 @@ export function ComputerView({
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
-      const state = await readControl(computerId, { basePath });
+      const state = await readControl(computerId, {
+        basePath,
+        signal: AbortSignal.timeout(10_000),
+      });
       if (!live) return;
       if (state) setControl(state);
       timer = setTimeout(tick, 1000);
@@ -313,7 +316,7 @@ export function ComputerView({
         >
           {showScreen && drawn ? (
             <img
-              src={`data:image/png;base64,${drawn.base64}`}
+              src={`data:image/jpeg;base64,${drawn.base64}`}
               alt="What the assistant is looking at"
               className="absolute inset-0 m-auto max-h-full max-w-full object-contain opacity-100 transition-opacity duration-300"
             />
@@ -443,11 +446,16 @@ export function ComputerView({
         ) : null}
       </figure>
       <Dialog open={expanded} onOpenChange={setExpanded}>
-        <DialogContent className="h-[94vh] w-[96vw] max-w-[1800px] p-2 sm:max-w-[1800px]">
+        <DialogContent
+          className="w-auto max-w-none gap-0 overflow-hidden rounded-xl p-0 sm:max-w-none"
+          style={{
+            width: `min(calc(100vw - 2rem), calc((100vh - 2rem) * ${aspectRatio}))`,
+          }}
+        >
           <DialogTitle className="sr-only">Tela do computador da assistente</DialogTitle>
           {drawn ? (
             <img
-              src={`data:image/png;base64,${drawn.base64}`}
+              src={`data:image/jpeg;base64,${drawn.base64}`}
               alt="Tela ampliada do computador da assistente"
               tabIndex={driving && !settled ? 0 : -1}
               onKeyDown={sendKey}
@@ -473,7 +481,7 @@ export function ComputerView({
                 sendHumanInput(computerId, "scroll", { deltaY: event.deltaY }, { basePath });
               }}
               className={cn(
-                "max-h-full min-h-0 max-w-full rounded-lg object-contain outline-none",
+                "block h-auto max-h-[calc(100vh-2rem)] w-full object-contain outline-none",
                 driving &&
                   !settled &&
                   "cursor-crosshair focus-visible:ring-2 focus-visible:ring-ring",

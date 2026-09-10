@@ -17,9 +17,11 @@ import {
   saveModel,
 } from "@/lib/chat-model";
 import {
+  COMPUTER_MODEL_ID,
   DEFAULT_VISION_CHAT_MODEL,
   VISION_CHAT_MODEL_IDS,
   isVisionChatModel,
+  resolveModelAlias,
 } from "@/lib/model-catalog";
 import { Button } from "@/components/ui/button";
 import { PromptSuggestion } from "@/components/prompt-kit/prompt-suggestion";
@@ -29,7 +31,6 @@ import { ModelSelector, type ModelOption } from "@/components/assistant-ui/model
 import {
   ComposerPlusMenu,
   ComposerComputerToggle,
-  ComposerComputerContext,
   useComposerComputer,
 } from "@/components/assistant-ui/composer-plus-menu";
 import { SkillChip } from "@/components/assistant-ui/skill-chip";
@@ -38,7 +39,7 @@ import { GenerationMedia } from "@/components/assistant-ui/generation-media";
 import { RunningActivity } from "@/components/assistant-ui/running-activity";
 import { PluginConnectionPrompt } from "@/components/assistant-ui/plugin-connection-prompt";
 import { ActiveBotAvatar, useActiveBotIdentity } from "@/components/bots/bot-avatar";
-import { cancelBotTranscriptRun, type BotRunTarget } from "@/lib/bot-transcript-history";
+import { useBotComputerTarget } from "@/components/bots/use-bot-computer";
 import {
   GptOssLogo,
   DeepSeekLogo,
@@ -79,6 +80,7 @@ import {
   CopyIcon,
   DownloadIcon,
   LoaderCircleIcon,
+  LockIcon,
   MicIcon,
   MonitorIcon,
   MoreHorizontalIcon,
@@ -115,7 +117,7 @@ const CHAT_MODEL_OPTIONS: readonly ModelOption[] = [
     keywords: ["deepseek"],
   },
   {
-    id: "ollama-cloud/deepseek-v4-pro:0813",
+    id: "ollama-cloud/deepseek-v4-pro",
     name: "Deep Seek V4 Pro (0813)",
     icon: <DeepSeekLogo />,
     keywords: ["deepseek"],
@@ -167,14 +169,14 @@ const CHAT_MODEL_OPTIONS: readonly ModelOption[] = [
     efforts: true,
   },
   {
-    id: "ollama-cloud/qwen3.5",
+    id: "ollama-cloud/qwen3.5:397b",
     name: "Qwen 3.5",
     icon: <QwenLogo />,
     keywords: ["qwen", "alibaba"],
     efforts: true,
   },
   {
-    id: "ollama-cloud/gemma4",
+    id: "ollama-cloud/gemma4:31b",
     name: "Gemma4",
     icon: <GeminiLogo />,
     keywords: ["gemma", "gemini", "google"],
@@ -292,153 +294,56 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  // Estado do toggle Computador: hidrata do localStorage e persiste a cada
-  // mudança. Vive AQUI (acima do composer) para o aviso de imagem+computador,
-  // o guard de envio e o toggle lerem o MESMO valor.
-  const [computer, setComputer] = useState(false);
-
-  useEffect(() => {
-    try {
-      setComputer(localStorage.getItem("nullain-computer") === "1");
-    } catch {
-      // sem persistência
-    }
-  }, []);
-  useEffect(() => {
-    try {
-      if (computer) localStorage.setItem("nullain-computer", "1");
-      else localStorage.removeItem("nullain-computer");
-    } catch {
-      // sem persistência
-    }
-  }, [computer]);
 
   return (
-    <ComposerComputerContext.Provider value={{ computer, setComputer }}>
-      <ThreadPrimitive.Root
-        className="aui-root aui-thread-root bg-background @container flex h-full flex-col"
-        style={{
-          ["--thread-max-width" as string]: "52rem",
-          ["--composer-bg" as string]: "var(--color-card)",
-          ["--composer-radius" as string]: "1.65rem",
-          ["--composer-padding" as string]: "14px",
-        }}
+    <ThreadPrimitive.Root
+      className="aui-root aui-thread-root bg-background @container flex h-full flex-col"
+      style={{
+        ["--thread-max-width" as string]: "52rem",
+        ["--composer-bg" as string]: "var(--color-card)",
+        ["--composer-radius" as string]: "1.65rem",
+        ["--composer-padding" as string]: "14px",
+      }}
+    >
+      <ThreadPrimitive.Viewport
+        turnAnchor="top"
+        data-slot="aui_thread-viewport"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
-        <ThreadPrimitive.Viewport
-          turnAnchor="top"
-          data-slot="aui_thread-viewport"
-          className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        <div
+          className={cn(
+            "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-6 sm:px-6",
+            isEmpty && "justify-center pb-[6vh]",
+          )}
         >
-          <div
+          <AuiIf condition={isNewChatView}>
+            <Welcome />
+          </AuiIf>
+          <AuiIf condition={isHistoryLoadingView}>
+            <ThreadHistorySkeleton />
+          </AuiIf>
+
+          <div data-slot="aui_message-group" className="mb-16 flex flex-col gap-y-8 empty:hidden">
+            <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
+          </div>
+
+          <ThreadPrimitive.ViewportFooter
             className={cn(
-              "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-6 sm:px-6",
-              isEmpty && "justify-center pb-[6vh]",
+              "aui-thread-viewport-footer flex flex-col gap-4 overflow-visible pb-5 md:pb-7",
+              !isEmpty &&
+                "sticky bottom-0 mt-auto rounded-t-(--composer-radius) bg-gradient-to-t from-background via-background via-80% to-transparent pt-6",
             )}
           >
-            <AuiIf condition={isNewChatView}>
-              <Welcome />
+            <ThreadScrollToBottom />
+            <ThreadFollowupSuggestions />
+            <Composer isEmpty={isEmpty} />
+            <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
+              <ThreadSuggestions />
             </AuiIf>
-            <AuiIf condition={isHistoryLoadingView}>
-              <ThreadHistorySkeleton />
-            </AuiIf>
-
-            <div data-slot="aui_message-group" className="mb-16 flex flex-col gap-y-8 empty:hidden">
-              <div className="flex flex-col items-center gap-1.5">
-                <TranscriptHistoryButton />
-                <BotRunCancelButton />
-              </div>
-              <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
-            </div>
-
-            <ThreadPrimitive.ViewportFooter
-              className={cn(
-                "aui-thread-viewport-footer flex flex-col gap-4 overflow-visible pb-5 md:pb-7",
-                !isEmpty &&
-                  "sticky bottom-0 mt-auto rounded-t-(--composer-radius) bg-gradient-to-t from-background via-background via-80% to-transparent pt-6",
-              )}
-            >
-              <ThreadScrollToBottom />
-              <ThreadFollowupSuggestions />
-              <Composer isEmpty={isEmpty} />
-              <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
-                <ThreadSuggestions />
-              </AuiIf>
-            </ThreadPrimitive.ViewportFooter>
-          </div>
-        </ThreadPrimitive.Viewport>
-      </ThreadPrimitive.Root>
-    </ComposerComputerContext.Provider>
-  );
-};
-
-const TranscriptHistoryButton: FC = () => {
-  const [visible, setVisible] = useState(false);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    const sync = () => {
-      try {
-        setVisible(Boolean(localStorage.getItem("nullain-active-bot-id")));
-      } catch {
-        setVisible(false);
-      }
-    };
-    sync();
-    window.addEventListener("nullain-bot-changed", sync);
-    return () => window.removeEventListener("nullain-bot-changed", sync);
-  }, []);
-  if (!visible) return null;
-  return (
-    <div className="flex justify-center">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={loading}
-        onClick={() => {
-          setLoading(true);
-          window.dispatchEvent(new Event("nullain-transcript-load-older"));
-          window.setTimeout(() => setLoading(false), 1000);
-        }}
-        className="h-8 rounded-full px-3.5 text-xs text-muted-foreground"
-      >
-        {loading ? "Carregando…" : "Carregar mensagens antigas"}
-      </Button>
-    </div>
-  );
-};
-
-const BotRunCancelButton: FC = () => {
-  const [active, setActive] = useState<(BotRunTarget & { runId: string }) | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    const onChange = (event: Event) => {
-      setActive((event as CustomEvent<(BotRunTarget & { runId: string }) | null>).detail ?? null);
-    };
-    window.addEventListener("nullain-transcript-active-run", onChange);
-    return () => window.removeEventListener("nullain-transcript-active-run", onChange);
-  }, []);
-  if (!active) return null;
-  return (
-    <div className="flex justify-center">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={busy}
-        onClick={() => {
-          setBusy(true);
-          void cancelBotTranscriptRun(active, active.runId)
-            .then(() => {
-              window.dispatchEvent(new Event("nullain-transcript-refresh"));
-            })
-            .catch(() => {})
-            .finally(() => setBusy(false));
-        }}
-        className="h-8 rounded-full px-3.5 text-xs"
-      >
-        {busy ? "Cancelando…" : "Cancelar execução"}
-      </Button>
-    </div>
+          </ThreadPrimitive.ViewportFooter>
+        </div>
+      </ThreadPrimitive.Viewport>
+    </ThreadPrimitive.Root>
   );
 };
 
@@ -583,6 +488,7 @@ const Composer: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       >
         <ComposerAttachments />
         <ComposerComputerImageWarning />
+        <ComposerComputerBotWarning />
         <ComposerSkillSelector />
         {skillSendError && (
           <p className="mx-3 mt-1 text-xs text-destructive" role="alert">
@@ -640,6 +546,60 @@ const ComposerComputerImageWarning: FC = () => {
   );
 };
 
+/**
+ * Aviso inline quando o Computador está ligado mas nenhum bot oferece sessão.
+ * Cada bot tem seu próprio computador isolado — sem bot ativo, o toggle não
+ * tem onde navegar. Só aparece após alguns segundos sem sessão para não
+ * piscar durante a resolução normal do transcript.
+ */
+const NO_BOT_GRACE_MS = 3500;
+
+const ComposerComputerBotWarning: FC = () => {
+  const { computer, setComputer } = useComposerComputer();
+  const { ready } = useBotComputerTarget();
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    if (!computer || ready) {
+      setSettled(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSettled(true), NO_BOT_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [computer, ready]);
+  if (!computer || ready || !settled) return null;
+  return (
+    <div
+      data-slot="aui-composer-computer-bot-warning"
+      role="alert"
+      className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-700 dark:text-sky-300"
+    >
+      <MonitorIcon className="size-3.5 shrink-0" />
+      <span className="flex-1">
+        O Computador está ligado, mas cada bot usa seu próprio computador isolado — selecione um bot
+        para navegar.
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-6 rounded-full border-sky-500/40 px-2 text-xs hover:bg-sky-500/10"
+        onClick={() => window.dispatchEvent(new Event("nullain-show-bots"))}
+      >
+        Ver bots
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-6 rounded-full px-2 text-xs"
+        onClick={() => setComputer(false)}
+      >
+        Desligar
+      </Button>
+    </div>
+  );
+};
+
 const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }> = ({
   onSelectedSend,
   checkingSkill,
@@ -647,6 +607,9 @@ const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }>
   const [model, setModel] = useState("ollama-cloud/gpt-oss:20b");
   const [effort, setEffort] = useState<string | undefined>(undefined);
   const [hydrated, setHydrated] = useState(false);
+  // Modo Computador usa SEMPRE o GPT-OSS 20B (backend força de qualquer
+  // forma) — o seletor trava para não sugerir uma escolha que seria ignorada.
+  const { computer } = useComposerComputer();
   const hasImageAttachment = useAuiState(
     (state) =>
       state.composer.attachments.some((attachment) => attachment.type === "image") ?? false,
@@ -654,7 +617,9 @@ const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }>
   const availableModels = hasImageAttachment ? VISION_MODEL_OPTIONS : CHAT_MODEL_OPTIONS;
 
   useEffect(() => {
-    const saved = localStorage.getItem("nullain-model");
+    const raw = localStorage.getItem("nullain-model");
+    // Migra IDs legados salvos (renomeados no registry do provider).
+    const saved = raw ? resolveModelAlias(raw) : null;
     if (saved && (MODEL_IDS as readonly string[]).includes(saved)) setModel(saved);
     else if (saved === "openai/gpt-oss:20b") setModel("ollama-cloud/gpt-oss:20b");
     const savedEffort = loadEffort();
@@ -665,6 +630,14 @@ const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }>
   useEffect(() => {
     if (hydrated) saveModel(model);
   }, [model, hydrated]);
+  // Ligou o Computador → fixa o modelo reservado na hora (sem esperar o
+  // efeito de persistência, para o próximo envio já levar o ID correto).
+  useEffect(() => {
+    if (computer) {
+      setModel(COMPUTER_MODEL_ID);
+      saveModel(COMPUTER_MODEL_ID);
+    }
+  }, [computer]);
   useEffect(() => {
     if (hasImageAttachment && !isVisionChatModel(model)) {
       setModel(DEFAULT_VISION_CHAT_MODEL);
@@ -682,16 +655,33 @@ const ComposerAction: FC<{ onSelectedSend: () => void; checkingSkill: boolean }>
       <div className="flex min-w-0 items-center gap-1.5" suppressHydrationWarning>
         <ComposerPlusMenu />
         <ComposerComputerToggle />
-        <ModelSelector
-          contentClassName="max-h-[560px] w-80"
-          models={availableModels}
-          value={model}
-          onValueChange={setModel}
-          effort={effort}
-          onEffortChange={setEffort}
-          variant="ghost"
-          size="sm"
-        />
+        {computer ? (
+          <span
+            title="Modelo fixo em GPT-OSS no Modo Computador (o backend força de qualquer forma)"
+            className="flex h-8 w-fit items-center gap-1.5 overflow-hidden rounded-md px-2 text-sm whitespace-nowrap text-muted-foreground"
+            aria-label="Modelo GPT-OSS fixo no Modo Computador"
+          >
+            <GptOssLogo />
+            <span className="truncate">GPT-OSS</span>
+            <LockIcon className="size-3.5 shrink-0" />
+          </span>
+        ) : (
+          <ModelSelector
+            contentClassName="max-h-[560px] w-80"
+            models={availableModels}
+            value={model}
+            // Persiste na hora (sem esperar efeito): trocar e enviar no mesmo
+            // frame levaria o modelo antigo ao backend.
+            onValueChange={(next) => {
+              setModel(next);
+              saveModel(next);
+            }}
+            effort={effort}
+            onEffortChange={setEffort}
+            variant="ghost"
+            size="sm"
+          />
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>

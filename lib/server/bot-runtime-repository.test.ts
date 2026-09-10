@@ -59,19 +59,19 @@ describe("Bot Runtime isolation", () => {
     expect(listBots("b")).toHaveLength(1);
   });
   it("does not expose bots, drafts, grants or conversations across owners", () => {
-    const a = bot("a", "Research A", ["commit-writer"]);
-    expect(listGrantedSkillNames("a", a.id)).toEqual(["commit-writer"]);
+    const a = bot("a", "Research A", ["skill-creator"]);
+    expect(listGrantedSkillNames("a", a.id)).toEqual(["skill-creator"]);
     expect(() => listGrantedSkillNames("b", a.id)).toThrow();
     expect(() => ensureBotConversation("b", a.id, "same")).toThrow();
     expect(() => resolveBotRuntime("b", a.id, "same")).toThrow();
   });
   it("isolates two bots, skills and memory namespaces", () => {
-    const one = bot("a", "One", ["commit-writer"]),
+    const one = bot("a", "One", ["skill-creator"]),
       two = bot("a", "Two", []);
     const c1 = resolveBotRuntime("a", one.id, "conversation-a"),
       c2 = resolveBotRuntime("a", two.id, "conversation-b");
     expect(c1.conversation.mastraThreadId).not.toBe(c2.conversation.mastraThreadId);
-    expect(c1.grantedSkillNames).toEqual(["commit-writer"]);
+    expect(c1.grantedSkillNames).toEqual(["skill-creator"]);
     expect(c2.grantedSkillNames).toEqual([]);
     expect(() => resolveBotRuntime("a", two.id, "conversation-a")).toThrow();
   });
@@ -135,7 +135,7 @@ describe("Bot Runtime isolation", () => {
     expect(second!.draft.id).not.toBe(review!.draft.id);
   });
   it("updates profile, status and skill grants with revision conflicts", () => {
-    const created = bot("a", "Profile Bot", ["commit-writer"]);
+    const created = bot("a", "Profile Bot", ["skill-creator"]);
     const before = requireBot("a", created.id);
     expect(() =>
       updateBotProfile("a", created.id, { revision: before.revision + 99, name: "X" }),
@@ -156,10 +156,10 @@ describe("Bot Runtime isolation", () => {
     const resumed = updateBotProfile("a", created.id, {
       revision: updated.revision,
       status: "ready",
-      skillNames: ["commit-writer"],
+      skillNames: ["skill-creator"],
     });
     expect(resumed.status).toBe("ready");
-    expect(listGrantedSkillNames("a", created.id)).toEqual(["commit-writer"]);
+    expect(listGrantedSkillNames("a", created.id)).toEqual(["skill-creator"]);
     expect(() =>
       updateBotProfile("a", created.id, { revision: resumed.revision, status: "x" }),
     ).toThrow(/Status inválido/);
@@ -169,7 +169,7 @@ describe("Bot Runtime isolation", () => {
     ).toThrow(/identidade principal/);
   });
   it("deletes a bot only with the exact name and cascades its data", () => {
-    const created = bot("a", "Disposable Bot", ["commit-writer"]);
+    const created = bot("a", "Disposable Bot", ["skill-creator"]);
     const conversation = resolveBotRuntime("a", created.id, "disposable-conversation");
     expect(() => deleteBot("a", created.id, { confirmName: "Wrong" })).toThrow(/nome exato/);
     expect(() => deleteBot("b", created.id, { confirmName: "Disposable Bot" })).toThrow();

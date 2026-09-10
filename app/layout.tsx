@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
@@ -44,7 +45,13 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" suppressHydrationWarning>
       <body className="antialiased">
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        {/* next/script com beforeInteractive: o Next injeta no <head> antes da
+            hidratação — <script> cru no body é rejeitado no Next 16/Turbopack. */}
+        <Script
+          id="nullain-theme-init"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: themeInitScript }}
+        />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

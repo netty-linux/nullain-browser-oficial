@@ -19,7 +19,9 @@ Assistente open source construído com Mastra, Ollama Cloud, Next.js e assistant
 
 ## Recursos
 
-- Kernel supervisor com processos especializados de pesquisa, código e síntese.
+- Kernel supervisor com processos especializados de código e síntese, além de navegação web pelo Computador local.
+- Bot Runtime persistente: a experiência começa somente com a Nullain e novos bots são criados por conversa.
+- Conversas e transcripts isolados por usuário e bot, com reload, paginação e retomada segura de execução.
 - Pesquisa pela web exclusivamente pelo Computador local isolado, controlada pelo usuário.
 - Memória persistente em LibSQL por conversa.
 - Biblioteca de Skills com nativas protegidas, catálogo privado por conta e seleção por `/` no chat.
@@ -61,6 +63,23 @@ Usuário → /api/chat → kernelAgent
 
 O `chatAgent` permanece registrado somente para compatibilidade com clientes legados.
 
+## Bot Runtime e conversas persistentes
+
+A Nullain é o único bot criado por padrão. Bots adicionais nascem por uma entrevista progressiva
+no próprio chat: objetivo, instruções, modelo e capacidades são revisados em cartões persistentes
+antes da confirmação. Todos usam a marca oficial da Nullain como avatar, com uma cor estável por
+bot nas listas, cabeçalhos, autoria e telas de revisão.
+
+O SQLite da aplicação é a fonte canônica do transcript visual. Mensagens do usuário são gravadas
+antes da execução; mensagens do assistant e seus estados são controlados apenas pelo servidor.
+Cada envio possui idempotência, um único run associado e transições protegidas para conclusão,
+falha, cancelamento ou interrupção. Recarregar a página restaura mensagens, partes estruturadas e
+execuções sem iniciar outro run ou duplicar o contexto entregue ao Mastra.
+
+As APIs autenticadas validam propriedade por usuário, bot e conversa. O navegador não escolhe
+papéis privilegiados, status finais, owner, namespace de memória ou tokens de claim. Tipos de parte
+estruturada são versionados e validados, e o chat legado continua no fluxo compatível existente.
+
 ## Computador local
 
 O toggle **Computador** disponibiliza ao kernel um Chromium real executado localmente em Docker.
@@ -69,17 +88,40 @@ aceitos como autoridade a partir do navegador. O runtime bloqueia redes locais/p
 automáticos e service workers, exige entrega explícita de controle para entrada humana e restaura a
 aba ativa depois de reinícios do processo web enquanto o container continuar vivo.
 
+O mesmo compose inicia um SearXNG privado em `127.0.0.1:8088`. A tool
+`nullain_computer_open_site` usa esse serviço para transformar nomes humanos em homepages oficiais,
+valida DNS e HTTPS no servidor, recusa resultados ambíguos e guarda resoluções confiáveis por 30 dias
+no SQLite. `nullain_computer_navigate` continua reservado para URLs exatas e verificadas.
+
 ```bash
 npm run computer:up
 npm run computer:status
 npm run computer:down
 ```
 
-A imagem do container está fixada por digest e escuta somente em `127.0.0.1`. Nenhum diretório do
-Windows, Docker socket ou credencial do host é montado no container. Para permitir deliberadamente
-uma intranet de desenvolvimento, use `NULLAIN_LOCAL_COMPUTER_ALLOW_PRIVATE_NETWORK=1`; o padrão é
-falhar fechado. O computador local é um navegador isolado, não um terminal nem acesso ao filesystem
-do Windows.
+Os serviços escutam somente em `127.0.0.1`. Nenhum diretório do Windows, Docker socket ou credencial
+do host é montado nos containers. Para permitir deliberadamente uma intranet de desenvolvimento,
+use `NULLAIN_LOCAL_COMPUTER_ALLOW_PRIVATE_NETWORK=1`; o padrão é falhar fechado. O computador local
+é um navegador isolado, não um terminal nem acesso ao filesystem do Windows. O endpoint do resolvedor
+pode ser substituído com `NULLAIN_SEARXNG_URL`.
+
+### Monitor ao vivo e confiabilidade
+
+O painel lateral exibe a página atual do Chromium com atualização de baixa latência, mantendo o
+chat compacto. O estado é escopado pela conversa e a troca de bot ou conversa cancela listeners
+anteriores, impedindo que uma resposta atrasada ou uma tela antiga apareça no lugar errado.
+
+A navegação distingue o sucesso da ação de falhas posteriores de observação: uma página que abriu
+não é reportada como falha apenas porque uma captura auxiliar atrasou. Capturas são deduplicadas,
+o cache usa JPEG limitado e conexões CDP, contextos remotos e reconexões possuem limites explícitos
+para evitar loops, vazamentos e crescimento indefinido de memória. A abertura simples usa o evento
+de commit e uma leitura leve de URL/título, reduzindo a latência sem mascarar erros reais.
+
+Nomes de sites informados em linguagem natural são resolvidos localmente pelo SearXNG, sem uma
+lista manual de domínios. O backend seleciona e valida a homepage oficial, aplica as políticas de
+rede e HTTPS e reutiliza resultados confiáveis do cache. Chamadas vazias ou parâmetros inválidos
+são reparados somente quando a intenção pode ser derivada com segurança da mensagem do usuário;
+casos ambíguos falham de forma explícita em vez de inventar uma URL.
 
 ## Skills
 
@@ -114,7 +156,6 @@ inválidos, inseguros ou duplicados são recusados.
 ## Nullain Code
 
 <img width="1919" height="917" alt="image" src="https://github.com/user-attachments/assets/4f235648-47a6-4ef9-b397-0da7f5d31910" />
-
 
 O recurso em `/code` é um ambiente local de engenharia de software com identidade
 própria, projetos isolados por usuário, conversas persistentes e aprovação humana
@@ -206,6 +247,17 @@ npm run lint      # lint e formatação
 npm run lint:fix  # correções automáticas
 npm run db:migrate # migra explicitamente o banco do Nullain Code
 ```
+
+## Qualidade e compatibilidade
+
+A suíte cobre migrations aditivas, repositories, autenticação e ownership, lifecycle concorrente
+de runs, transcript e reload, entrevista de bots, Skills, Nullain Code, transformação de streaming,
+reparo de tool calls, resolução de sites e Computador local. O projeto também é verificado com
+TypeScript sem emissão, lint/formatter e build de produção do Next.js.
+
+As mudanças preservam os fluxos existentes de chat, Code, Skills, Plugins e autenticação. O
+Computador não amplia o acesso ao filesystem do Windows e os serviços locais permanecem vinculados
+ao loopback.
 
 ## Licença
 

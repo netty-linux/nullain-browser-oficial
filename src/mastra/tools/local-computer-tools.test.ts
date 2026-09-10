@@ -12,6 +12,7 @@ describe("local computer toolset", () => {
     expect(Object.keys(tools).sort()).toEqual(
       [
         "nullain_computer_navigate",
+        "nullain_computer_open_site",
         "nullain_computer_snapshot",
         "nullain_computer_read",
         "nullain_computer_click",

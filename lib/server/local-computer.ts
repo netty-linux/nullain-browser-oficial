@@ -17,6 +17,7 @@ type LocalComputerSession = {
   touchedAt: number;
   control: "assistant" | "human";
   frames: Map<string, { url: string; title: string | null; frame: string }>;
+  lastFrame?: { frame: string; url: string; capturedAt: string };
   marker: string;
 };
 
@@ -58,12 +59,25 @@ async function browser(): Promise<Browser> {
     state.__nullainLocalComputerSessions?.clear();
   }
   if (!state.__nullainLocalComputerBrowser) {
-    state.__nullainLocalComputerBrowser = chromium.connectOverCDP(endpoint()).catch((error) => {
-      delete state.__nullainLocalComputerBrowser;
-      throw new Error(
-        `O runtime local do computador não está acessível em ${endpoint()}. ${error instanceof Error ? error.message : ""}`.trim(),
-      );
-    });
+    state.__nullainLocalComputerBrowser = chromium
+      .connectOverCDP(endpoint(), { timeout: 10_000 })
+      .then(async (connected) => {
+        // O browser é dedicado à Nullain. Hot reloads/reinícios do Next perdiam o
+        // mapa em memória, mas deixavam contextos Chromium órfãos no container.
+        // Mantenha apenas o limite mais recente também no processo remoto.
+        const contexts = connected.contexts();
+        const excess = Math.max(0, contexts.length - MAX_SCOPES);
+        for (const context of contexts.slice(0, excess)) {
+          await context.close().catch(() => undefined);
+        }
+        return connected;
+      })
+      .catch((error) => {
+        delete state.__nullainLocalComputerBrowser;
+        throw new Error(
+          `O runtime local do computador não está acessível em ${endpoint()}. ${error instanceof Error ? error.message : ""}`.trim(),
+        );
+      });
   }
   return state.__nullainLocalComputerBrowser;
 }
@@ -116,6 +130,20 @@ function sessions() {
   const state = globals();
   state.__nullainLocalComputerSessions ??= new Map();
   return state.__nullainLocalComputerSessions;
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function pruneSessions(exceptKey: string) {
@@ -180,9 +208,12 @@ async function reconnectSession(scope: LocalComputerScope): Promise<LocalCompute
     });
     for (const page of pages) {
       if (page.isClosed()) continue;
-      const pageMarker = await page
-        .evaluate(() => (globalThis as { __nullainScopeMarker?: string }).__nullainScopeMarker)
-        .catch(() => undefined);
+      const pageMarker = await settleWithin(
+        page
+          .evaluate(() => (globalThis as { __nullainScopeMarker?: string }).__nullainScopeMarker)
+          .catch(() => undefined),
+        1_500,
+      );
       if (pageMarker !== marker) continue;
       await secureContext(context);
       return {
@@ -218,7 +249,7 @@ function assertAssistantControl(session: LocalComputerSession) {
   }
 }
 
-async function safeUrl(value: unknown): Promise<string> {
+export async function validatePublicComputerUrl(value: unknown): Promise<string> {
   if (typeof value !== "string" || value.length > 4_096) throw new Error("URL inválida.");
   const parsed = new URL(value);
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -259,20 +290,24 @@ export function networkHostAllowed(hostname: string): boolean {
   return true;
 }
 
-async function pageSummary(page: Page) {
+async function pageSummary(
+  page: Page,
+  options: { maxChars?: number; textTimeoutMs?: number } = {},
+) {
+  const maxChars = options.maxChars ?? MAX_READ_CHARS;
   const text = (
     await page
       .locator("body")
-      .innerText({ timeout: 10_000 })
+      .innerText({ timeout: options.textTimeoutMs ?? 10_000 })
       .catch(() => "")
   )
     .replace(/\n{3,}/g, "\n\n")
-    .slice(0, MAX_READ_CHARS);
+    .slice(0, maxChars);
   return {
     url: page.url(),
     title: (await page.title().catch(() => "")) || null,
     text,
-    truncated: text.length === MAX_READ_CHARS,
+    truncated: text.length === maxChars,
   };
 }
 
@@ -301,13 +336,27 @@ export async function navigateLocalComputer(
 ) {
   const session = await getLocalComputer(scope);
   assertAssistantControl(session);
-  await session.page.goto(await safeUrl(url), {
-    waitUntil: "domcontentloaded",
-    timeout: 45_000,
+  await session.page.goto(await validatePublicComputerUrl(url), {
+    // `commit` confirma que o servidor respondeu e permite que a tela ao vivo
+    // apareça imediatamente; SPAs podem manter domcontentloaded pendente por muito tempo.
+    waitUntil: "commit",
+    timeout: 20_000,
   });
-  await session.page.waitForTimeout(500);
-  if (toolCallId) await storePageFrame(session, toolCallId);
-  return pageSummary(session.page);
+  await session.page
+    .waitForLoadState("domcontentloaded", { timeout: 1_200 })
+    .catch(() => undefined);
+  const summary = {
+    url: session.page.url(),
+    title:
+      (await settleWithin(
+        session.page.title().catch(() => ""),
+        800,
+      ).catch(() => "")) || null,
+    text: "",
+    truncated: false,
+  };
+  if (toolCallId) void storePageFrame(session, toolCallId).catch(() => undefined);
+  return summary;
 }
 
 export async function readLocalComputer(scope: LocalComputerScope) {
@@ -322,26 +371,60 @@ export async function snapshotLocalComputer(scope: LocalComputerScope) {
   session.refs.clear();
   const elements = await session.page
     .locator("a,button,input,textarea,select,[role=button],[role=link],[contenteditable=true]")
-    .evaluateAll((nodes) =>
-      nodes.slice(0, 200).map((node, index) => {
-        const element = node as HTMLElement;
-        const ref = `e${index + 1}`;
+    .evaluateAll((nodes) => {
+      // Tudo serializável aqui dentro: nós DOM não cruzam o boundary do
+      // Playwright. Passada única com rejeições baratas primeiro (índice,
+      // disabled, bounds) e só então o getComputedStyle — que força recálculo
+      // de estilo e é o custo dominante em páginas grandes. Para após o teto.
+      const out: Array<{
+        ref: string;
+        tag: string;
+        role: string | null;
+        name: string;
+        type: string | undefined;
+        value: string | undefined;
+      }> = [];
+      for (let index = 0; index < nodes.length && out.length < 200; index += 1) {
+        if (index >= 1200) break;
+        const element = nodes[index] as HTMLElement;
+        if (element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true")
+          continue;
+        const bounds = element.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0) continue;
+        const style = window.getComputedStyle(element);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          Number(style.opacity || "1") <= 0
+        )
+          continue;
+        // O ref ancora o clique futuro via [data-nullain-ref] (ver target()).
+        const ref = `e${out.length + 1}`;
         element.dataset.nullainRef = ref;
         const input = element as HTMLInputElement;
-        return {
+        const rawName =
+          element.getAttribute("aria-label") ||
+          element.innerText?.trim() ||
+          input.placeholder ||
+          input.name ||
+          "";
+        out.push({
           ref,
           tag: element.tagName.toLowerCase(),
           role: element.getAttribute("role"),
-          name:
-            element.getAttribute("aria-label") ||
-            element.innerText ||
-            input.placeholder ||
-            input.name ||
-            "",
+          // Nomes gigantes viram milhares de tokens: 120 chars identificam.
+          name: rawName.replace(/\s+/g, " ").trim().slice(0, 120),
           type: input.type || undefined,
-        };
-      }),
-    );
+          value:
+            input.type === "password"
+              ? undefined
+              : typeof input.value === "string" && input.value
+                ? input.value.slice(0, 200)
+                : undefined,
+        });
+      }
+      return out;
+    });
   for (const element of elements) session.refs.set(element.ref, element.ref);
   return { snapshotId: session.snapshotId, url: session.page.url(), elements };
 }
@@ -502,25 +585,51 @@ export async function supplyLocalComputerSecret(scope: LocalComputerScope, text:
   return { ok: true };
 }
 
+/**
+ * Captura JPEG (não PNG): o frame serve só para exibição humana (o modelo
+ * nunca vê imagem — as tools devolvem texto), e o JPEG q70 tem 5-10x menos
+ * bytes, acelerando CDP + transferência + decode a cada poll de 650ms.
+ */
+async function captureFrame(page: Page): Promise<string> {
+  const frame = await page.screenshot({ type: "jpeg", quality: 70, timeout: 8_000 });
+  return frame.toString("base64");
+}
+
 export async function screenshotLocalComputer(scope: LocalComputerScope) {
   const session = await getLocalComputer(scope);
-  const frame = await session.page.screenshot({ type: "png" });
+  const captured = await captureFrame(session.page)
+    .then((frame) => {
+      const value = { frame, url: session.page.url(), capturedAt: new Date().toISOString() };
+      session.lastFrame = value;
+      return value;
+    })
+    .catch((error) => {
+      // Um paint temporariamente ocupado não deve apagar a tela ao vivo. Preserve
+      // também URL e instante originais para nunca rotular um frame antigo como novo.
+      if (session.lastFrame) return session.lastFrame;
+      throw error;
+    });
   const viewport = session.page.viewportSize() ?? { width: 1280, height: 800 };
   return {
-    base64: frame.toString("base64"),
+    base64: captured.frame,
     width: viewport.width,
     height: viewport.height,
-    capturedAt: new Date().toISOString(),
-    url: session.page.url(),
+    capturedAt: captured.capturedAt,
+    url: captured.url,
   };
 }
 
 async function storePageFrame(session: LocalComputerSession, toolCallId: string) {
-  const frame = await session.page.screenshot({ type: "png" });
+  const frame = await captureFrame(session.page);
+  session.lastFrame = {
+    frame,
+    url: session.page.url(),
+    capturedAt: new Date().toISOString(),
+  };
   session.frames.set(toolCallId, {
     url: session.page.url(),
     title: (await session.page.title().catch(() => "")) || null,
-    frame: frame.toString("base64"),
+    frame,
   });
   while (session.frames.size > 40) session.frames.delete(session.frames.keys().next().value!);
 }
@@ -550,6 +659,22 @@ export async function destroyLocalComputer(scope: LocalComputerScope) {
   sessions().delete(key);
   await session.context.close().catch(() => undefined);
   return true;
+}
+
+/**
+ * Destroys every live computer session owned by `ownerUserId` for `botId`
+ * (all conversations). Called on bot deletion so logged-in cookies and pages
+ * of a deleted bot never linger in memory — each bot's computer dies with it.
+ */
+export async function destroyBotComputers(ownerUserId: string, botId: string): Promise<number> {
+  const prefix = `${ownerUserId}:${botId}:`;
+  const keys = [...sessions().keys()].filter((key) => key.startsWith(prefix));
+  for (const key of keys) {
+    const session = sessions().get(key);
+    sessions().delete(key);
+    await session?.context.close().catch(() => undefined);
+  }
+  return keys.length;
 }
 
 export async function localComputerStatus(scope: LocalComputerScope) {

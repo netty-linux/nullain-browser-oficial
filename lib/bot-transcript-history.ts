@@ -76,10 +76,12 @@ export function resolveTranscriptTarget(selection: {
   if (cached) return cached;
   const request = fetch(`/api/bots/${encodeURIComponent(selection.botId)}/conversations`, {
     method: "POST",
+    credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ clientConversationId: selection.clientConversationId }),
   })
     .then(async (response) => {
+      if (response.status === 401) throw new UnauthenticatedError();
       if (!response.ok) throw new Error("Não foi possível abrir a conversa do bot.");
       const body = (await response.json()) as { conversation: { id: string } };
       return { ...selection, conversationId: body.conversation.id };
@@ -100,10 +102,16 @@ export function useBotTranscriptTarget() {
       const selection = readSelection();
       const current = ++generation;
       if (!selection) return setTarget(null);
-      const resolved = await resolveTranscriptTarget(selection);
-      if (current === generation) setTarget(resolved);
+      try {
+        const resolved = await resolveTranscriptTarget(selection);
+        if (current === generation) setTarget(resolved);
+      } catch (error) {
+        // Visitante sem login: sem bot ativo, sem spam de 401 no console.
+        if (!isUnauthenticatedError(error)) console.error(error);
+        if (current === generation) setTarget(null);
+      }
     };
-    void resolve().catch(console.error);
+    void resolve();
     window.addEventListener("nullain-bot-changed", resolve);
     return () => {
       generation += 1;
@@ -160,7 +168,9 @@ export async function readBotTranscript(
   if (before !== undefined) query.set("before", String(before));
   const response = await fetch(
     `/api/bots/${encodeURIComponent(target.botId)}/conversations/${encodeURIComponent(target.conversationId)}/transcript?${query}`,
+    { credentials: "include" },
   );
+  if (response.status === 401) throw new UnauthenticatedError();
   if (!response.ok) throw new Error("Não foi possível carregar o histórico do bot.");
   const body = (await response.json()) as {
     messages: TranscriptMessage[];
@@ -185,10 +195,25 @@ export async function readBotTranscript(
 
 export type BotRunTarget = { botId: string; conversationId: string };
 
+/** Erro lançado quando o usuário ainda não autenticou (visitante em `/`). */
+export class UnauthenticatedError extends Error {
+  constructor(message = "Entre para usar um bot persistente.") {
+    super(message);
+    this.name = "UnauthenticatedError";
+  }
+}
+
+export function isUnauthenticatedError(error: unknown): boolean {
+  return (
+    error instanceof UnauthenticatedError ||
+    (error instanceof Error && error.name === "UnauthenticatedError")
+  );
+}
+
 export async function cancelBotTranscriptRun(target: BotRunTarget, runId: string): Promise<void> {
   const response = await fetch(
     `/api/bots/${encodeURIComponent(target.botId)}/conversations/${encodeURIComponent(target.conversationId)}/runs/${encodeURIComponent(runId)}/cancel?action=cancel`,
-    { method: "POST" },
+    { method: "POST", credentials: "include" },
   );
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -197,7 +222,9 @@ export async function cancelBotTranscriptRun(target: BotRunTarget, runId: string
 }
 
 export async function readBotComputerLink(botId: string): Promise<BotComputerLinkState> {
-  const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/computer`);
+  const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/computer`, {
+    credentials: "include",
+  });
   if (!response.ok) throw new Error("Não foi possível carregar o vínculo do computador.");
   const body = (await response.json()) as {
     enabled: boolean;
@@ -209,6 +236,7 @@ export async function readBotComputerLink(botId: string): Promise<BotComputerLin
 export async function saveBotComputerLink(botId: string, openbotAgentId: string): Promise<void> {
   const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/computer`, {
     method: "PUT",
+    credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ openbotAgentId }),
   });
@@ -221,6 +249,7 @@ export async function saveBotComputerLink(botId: string, openbotAgentId: string)
 export async function clearBotComputerLink(botId: string): Promise<void> {
   const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/computer`, {
     method: "DELETE",
+    credentials: "include",
   });
   if (!response.ok && response.status !== 204) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };

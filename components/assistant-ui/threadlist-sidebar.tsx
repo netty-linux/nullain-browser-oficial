@@ -47,6 +47,19 @@ export function ThreadListSidebar() {
     return () => mobile.removeEventListener("change", collapseOnMobile);
   }, []);
 
+  // O aviso "computador sem bot" no composer pede foco na lista de bots.
+  useEffect(() => {
+    const showBots = () => {
+      setTab("chats");
+      setCollapsed(false);
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "0");
+      } catch {}
+    };
+    window.addEventListener("nullain-show-bots", showBots);
+    return () => window.removeEventListener("nullain-show-bots", showBots);
+  }, []);
+
   const updateCollapsed = (value: boolean) => {
     setCollapsed(value);
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, value ? "1" : "0");
@@ -178,7 +191,7 @@ export function ThreadListSidebar() {
             ) : tab === "search" ? (
               <ThreadSearchPanel onOpenThread={() => setTab("chats")} />
             ) : (
-              <CoworkersPanel />
+              <CoworkersPanel onSelectAgent={() => setTab("chats")} />
             )}
           </div>
         )}
